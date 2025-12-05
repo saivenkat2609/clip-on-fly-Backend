@@ -1,0 +1,257 @@
+{
+  "Comment": "Opus Clip Cloud - User Upload Flow State Machine (REUSES EXISTING FUNCTIONS)",
+  "StartAt": "VerifyUpload",
+  "States": {
+    "VerifyUpload": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Verify that user has uploaded the video to S3/R2",
+      "Parameters": {
+        "FunctionName": "opus-upload",
+        "Payload": {
+          "action": "verify",
+          "session_id.$": "$.session_id",
+          "s3_video_key.$": "$.s3_video_key",
+          "user_id.$": "$.user_id",
+          "user_email.$": "$.user_email",
+          "video_title.$": "$.video_title",
+          "video_description.$": "$.video_description"
+        }
+      },
+      "ResultPath": "$.uploadResult",
+      "ResultSelector": {
+        "statusCode.$": "$.Payload.statusCode",
+        "session_id.$": "$.Payload.session_id",
+        "s3_video_key.$": "$.Payload.s3_video_key",
+        "video_info.$": "$.Payload.video_info",
+        "file_size.$": "$.Payload.file_size"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "Transcribe"
+    },
+    "Transcribe": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Transcribe uploaded video with word-level timestamps (REUSES EXISTING FUNCTION)",
+      "Parameters": {
+        "FunctionName": "opus-transcribe",
+        "Payload": {
+          "session_id.$": "$.session_id",
+          "s3_video_key.$": "$.uploadResult.s3_video_key",
+          "video_info.$": "$.uploadResult.video_info",
+          "user_id.$": "$.user_id"
+        }
+      },
+      "ResultPath": "$.transcribeResult",
+      "ResultSelector": {
+        "statusCode.$": "$.Payload.statusCode",
+        "session_id.$": "$.Payload.session_id",
+        "s3_video_key.$": "$.Payload.s3_video_key",
+        "s3_transcript_key.$": "$.Payload.s3_transcript_key",
+        "video_info.$": "$.Payload.video_info",
+        "transcript_preview.$": "$.Payload.transcript_preview"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "DetectClips"
+    },
+    "DetectClips": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Detect viral clip segments with AI scoring (REUSES EXISTING FUNCTION)",
+      "Parameters": {
+        "FunctionName": "opus-detect",
+        "Payload": {
+          "session_id.$": "$.session_id",
+          "s3_video_key.$": "$.transcribeResult.s3_video_key",
+          "s3_transcript_key.$": "$.transcribeResult.s3_transcript_key",
+          "video_info.$": "$.transcribeResult.video_info",
+          "user_id.$": "$.user_id"
+        }
+      },
+      "ResultPath": "$.detectResult",
+      "ResultSelector": {
+        "statusCode.$": "$.Payload.statusCode",
+        "session_id.$": "$.Payload.session_id",
+        "s3_video_key.$": "$.Payload.s3_video_key",
+        "clips.$": "$.Payload.clips",
+        "video_info.$": "$.Payload.video_info"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 3,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "ProcessClipsInParallel"
+    },
+    "ProcessClipsInParallel": {
+      "Type": "Map",
+      "Comment": "Process all detected clips in parallel with karaoke subtitles (REUSES EXISTING FUNCTION)",
+      "ItemsPath": "$.detectResult.clips",
+      "MaxConcurrency": 3,
+      "Parameters": {
+        "session_id.$": "$.session_id",
+        "s3_video_key.$": "$.detectResult.s3_video_key",
+        "clip.$": "$$.Map.Item.Value",
+        "user_id.$": "$.user_id"
+      },
+      "Iterator": {
+        "StartAt": "ProcessSingleClip",
+        "States": {
+          "ProcessSingleClip": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "Process individual clip with aspect ratio conversion and karaoke subtitles",
+            "Parameters": {
+              "FunctionName": "opus-process-clip",
+              "Payload": {
+                "session_id.$": "$.session_id",
+                "s3_video_key.$": "$.s3_video_key",
+                "clip.$": "$.clip"
+              }
+            },
+            "ResultSelector": {
+              "statusCode.$": "$.Payload.statusCode",
+              "session_id.$": "$.Payload.session_id",
+              "clip_index.$": "$.Payload.clip_index",
+              "s3_clip_key.$": "$.Payload.s3_clip_key",
+              "aspect_ratio.$": "$.Payload.aspect_ratio",
+              "title.$": "$.Payload.title",
+              "virality_score.$": "$.Payload.virality_score",
+              "score_breakdown.$": "$.Payload.score_breakdown",
+              "start.$": "$.Payload.start",
+              "end.$": "$.Payload.end",
+              "duration.$": "$.Payload.duration"
+            },
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 3,
+                "MaxAttempts": 2,
+                "BackoffRate": 1.5
+              }
+            ],
+            "End": true
+          }
+        }
+      },
+      "ResultPath": "$.processedClips",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "Finalize"
+    },
+    "Finalize": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Aggregate results and generate download URLs (REUSES EXISTING FUNCTION)",
+      "Parameters": {
+        "FunctionName": "opus-finalize",
+        "Payload": {
+          "session_id.$": "$.session_id",
+          "processed_clips.$": "$.processedClips",
+          "video_info.$": "$.detectResult.video_info",
+          "user_id.$": "$.user_id",
+          "user_email.$": "$.user_email"
+        }
+      },
+      "ResultSelector": {
+        "statusCode.$": "$.Payload.statusCode",
+        "session_id.$": "$.Payload.session_id",
+        "status.$": "$.Payload.status",
+        "clips.$": "$.Payload.clips",
+        "total_clips.$": "$.Payload.total_clips",
+        "video_info.$": "$.Payload.video_info"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "HandleError",
+          "ResultPath": "$.error"
+        }
+      ],
+      "End": true
+    },
+    "HandleError": {
+      "Type": "Pass",
+      "Comment": "Handle any errors in the pipeline",
+      "Parameters": {
+        "statusCode": 500,
+        "session_id.$": "$.session_id",
+        "status": "failed",
+        "error.$": "$.error.Cause",
+        "user_id.$": "$.user_id"
+      },
+      "End": true
+    }
+  }
+}

@@ -1,0 +1,54 @@
+# Dockerfile — builds a Lambda-compatible layer zip containing yt-dlp, node, ffmpeg
+FROM amazonlinux:2 AS builder
+
+# Tools
+RUN yum -y install tar xz unzip which curl gzip zip gzip python3 pip && \
+    yum clean all
+
+# Workdir
+WORKDIR /build
+
+# Variables (change versions here if desired)
+ENV NODE_VERSION=v20.14.0 \
+    YTDLP_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp" \
+    FFMPEG_URL="https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+
+# Create target structure
+RUN mkdir -p /build/opt/bin /build/tmp
+
+# Download node, yt-dlp, ffmpeg
+RUN set -eux; \
+    cd /build/tmp; \
+    echo "Downloading yt-dlp..."; \
+    curl -fSL --retry 3 --retry-delay 2 -o yt-dlp "${YTDLP_URL}"; \
+    chmod +x yt-dlp; \
+    echo "Downloading Node ${NODE_VERSION}..."; \
+    curl -fSL --retry 3 --retry-delay 2 -o node.tar.xz "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-x64.tar.xz"; \
+    echo "Downloading ffmpeg..."; \
+    curl -fSL --retry 3 --retry-delay 2 -o ffmpeg.tar.xz "${FFMPEG_URL}"; \
+    \
+    echo "Installing yt-dlp to /build/opt/bin..."; \
+    mv yt-dlp /build/opt/bin/yt-dlp; \
+    chmod +x /build/opt/bin/yt-dlp; \
+    \
+    echo "Extracting node..."; \
+    tar -xJf node.tar.xz -C /build/tmp; \
+    NODE_DIR=$(tar -tf node.tar.xz | head -1 | cut -f1 -d"/"); \
+    cp /build/tmp/${NODE_DIR}/bin/node /build/opt/bin/node; \
+    cp -a /build/tmp/${NODE_DIR}/bin/npm /build/opt/bin/ || true; \
+    cp -a /build/tmp/${NODE_DIR}/bin/npx /build/opt/bin/ || true; \
+    chmod +x /build/opt/bin/node /build/opt/bin/npm /build/opt/bin/npx || true; \
+    \
+    echo "Extracting ffmpeg..."; \
+    tar -xJf ffmpeg.tar.xz -C /build/tmp; \
+    FFMPEG_DIR=$(tar -tf ffmpeg.tar.xz | head -1 | cut -f1 -d"/"); \
+    cp /build/tmp/${FFMPEG_DIR}/ffmpeg /build/opt/bin/ffmpeg; \
+    cp /build/tmp/${FFMPEG_DIR}/ffprobe /build/opt/bin/ffprobe; \
+    chmod +x /build/opt/bin/ffmpeg /build/opt/bin/ffprobe; \
+    \
+    echo "Strip binaries to save space (optional)"; \
+    # strip isn't present by default; we avoid stripping to be safe.
+
+# Final layer packaging
+FROM scratch AS pack
+COPY --from=builder /build/opt /opt

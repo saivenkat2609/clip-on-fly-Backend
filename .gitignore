@@ -17,8 +17,23 @@ outputs/
 *.mp4
 *.mp3
 *.wav
-*.json
 !requirements_cloud.txt
+
+# AWS Lambda Build Artifacts
+deploy-*/
+layer/
+opt/
+build_output/
+node_modules/
+node-v*/
+
+# Lambda Deployment Packages
+*.zip
+!deployment/*.zip
+
+# Lambda Layers
+*-layer/
+lambda_layer.zip
 
 # Logs
 *.log
