@@ -1,0 +1,52 @@
+# Dockerfile for opus-transcribe Lambda Function (ECR Deployment)
+# This creates a container image for the transcription Lambda function
+# Uses AWS Lambda Python 3.11 base image for compatibility
+ 
+FROM public.ecr.aws/lambda/python:3.11
+ 
+# Set working directory
+WORKDIR ${LAMBDA_TASK_ROOT}
+ 
+# Install ALL system dependencies in one go
+# - gcc, gcc-c++, make: Required for Rust linker and compiling native extensions
+# - tar, xz: For extracting ffmpeg
+# - ffmpeg: Required by Whisper for audio processing (installed from static build)
+RUN yum update -y && \
+    yum install -y gcc gcc-c++ make tar xz && \
+    curl -L https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz && \
+    tar xf /tmp/ffmpeg.tar.xz -C /tmp && \
+    mv /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ && \
+    mv /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ && \
+    rm -rf /tmp/ffmpeg* && \
+    yum clean all && \
+    rm -rf /var/cache/yum
+ 
+# Install Rust compiler (required for building tiktoken used by openai-whisper)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+ 
+# Copy requirements file
+COPY ../requirements-docker-transcribe.txt requirements-transcribe.txt
+
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements-transcribe.txt
+
+# Copy the Lambda function code
+COPY ../../src/transcribe/lambda_function.py lambda_function.py
+ 
+# Pre-download the Whisper model to reduce cold start time
+# This adds the model to the container image
+# Default to 'base' model - can be overridden with build args
+ARG WHISPER_MODEL=base
+RUN python -c "import whisper; whisper.load_model('${WHISPER_MODEL}')"
+ 
+# Set environment variables
+ENV WHISPER_MODEL=${WHISPER_MODEL}
+ENV PYTHONUNBUFFERED=1
+ 
+ENV XDG_CACHE_HOME=/tmp/.cache
+ENV TORCH_HOME=/tmp/.torch
+ENV HF_HOME=/tmp/.huggingface
+# Lambda handler
+CMD ["lambda_function.lambda_handler"]

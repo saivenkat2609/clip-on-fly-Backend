@@ -1,0 +1,16 @@
+{
+  "name": "opus-node-download",
+  "version": "1.0.0",
+  "description": "Node.js Lambda function for downloading YouTube videos",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.645.0",
+    "@aws-sdk/lib-storage": "^3.645.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}

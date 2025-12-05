@@ -1,0 +1,6 @@
+# NO DEPENDENCIES NEEDED!
+# This lambda only uses:
+# - boto3 (built-in to Lambda)
+# - json, os, uuid (Python standard library)
+
+# Empty requirements - nothing to install

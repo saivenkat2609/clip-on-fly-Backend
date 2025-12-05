@@ -1,0 +1,244 @@
+{
+  "Comment": "Opus Clip Video Processing Pipeline - Multi-Lambda Architecture with user_id preservation",
+  "StartAt": "RouteToStep",
+  "States": {
+    "RouteToStep": {
+      "Type": "Choice",
+      "Comment": "Route to appropriate step based on startFrom parameter",
+      "Choices": [
+        {
+          "Variable": "$.startFrom",
+          "StringEquals": "transcribe",
+          "Next": "TranscribeVideo"
+        },
+        {
+          "Variable": "$.startFrom",
+          "StringEquals": "detect",
+          "Next": "DetectClips"
+        },
+        {
+          "Variable": "$.startFrom",
+          "StringEquals": "process",
+          "Next": "ProcessClipsInParallel"
+        },
+        {
+          "Variable": "$.startFrom",
+          "StringEquals": "finalize",
+          "Next": "FinalizeResults"
+        }
+      ],
+      "Default": "DownloadVideo"
+    },
+    "DownloadVideo": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-node-download",
+      "Comment": "Download YouTube video to S3",
+      "ResultPath": "$.downloadResult",
+      "ResultSelector": {
+        "session_id.$": "$.session_id",
+        "s3_video_key.$": "$.s3_video_key",
+        "video_info.$": "$.video_info"
+      },
+      "Next": "MergeDownloadResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "HandleError"
+        }
+      ],
+      "TimeoutSeconds": 300
+    },
+    "MergeDownloadResult": {
+      "Type": "Pass",
+      "Parameters": {
+        "session_id.$": "$.downloadResult.session_id",
+        "s3_video_key.$": "$.downloadResult.s3_video_key",
+        "video_info.$": "$.downloadResult.video_info",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email"
+      },
+      "Next": "TranscribeVideo"
+    },
+    "TranscribeVideo": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-transcribe",
+      "Comment": "Transcribe audio using Whisper",
+      "ResultPath": "$.transcribeResult",
+      "ResultSelector": {
+        "session_id.$": "$.session_id",
+        "s3_video_key.$": "$.s3_video_key",
+        "s3_transcript_key.$": "$.s3_transcript_key",
+        "video_info.$": "$.video_info"
+      },
+      "Next": "MergeTranscribeResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed",
+            "States.Timeout"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "HandleError"
+        }
+      ],
+      "TimeoutSeconds": 600
+    },
+    "MergeTranscribeResult": {
+      "Type": "Pass",
+      "Parameters": {
+        "session_id.$": "$.transcribeResult.session_id",
+        "s3_video_key.$": "$.transcribeResult.s3_video_key",
+        "s3_transcript_key.$": "$.transcribeResult.s3_transcript_key",
+        "video_info.$": "$.transcribeResult.video_info",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email"
+      },
+      "Next": "DetectClips"
+    },
+    "DetectClips": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-detect",
+      "Comment": "Detect viral clip segments",
+      "ResultPath": "$.detectResult",
+      "ResultSelector": {
+        "session_id.$": "$.session_id",
+        "s3_video_key.$": "$.s3_video_key",
+        "clips.$": "$.clips",
+        "video_info.$": "$.video_info"
+      },
+      "Next": "MergeDetectResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "HandleError"
+        }
+      ],
+      "TimeoutSeconds": 60
+    },
+    "MergeDetectResult": {
+      "Type": "Pass",
+      "Parameters": {
+        "session_id.$": "$.detectResult.session_id",
+        "s3_video_key.$": "$.detectResult.s3_video_key",
+        "clips.$": "$.detectResult.clips",
+        "video_info.$": "$.detectResult.video_info",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email"
+      },
+      "Next": "CheckClipsFound"
+    },
+    "CheckClipsFound": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.clips",
+          "IsPresent": true,
+          "Next": "ProcessClipsInParallel"
+        }
+      ],
+      "Default": "NoClipsFound"
+    },
+    "ProcessClipsInParallel": {
+      "Type": "Map",
+      "Comment": "Process each clip in parallel (up to 10 concurrent)",
+      "ItemsPath": "$.clips",
+      "MaxConcurrency": 10,
+      "Parameters": {
+        "session_id.$": "$.session_id",
+        "s3_video_key.$": "$.s3_video_key",
+        "clip.$": "$$.Map.Item.Value",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email"
+      },
+      "Iterator": {
+        "StartAt": "ProcessSingleClip",
+        "States": {
+          "ProcessSingleClip": {
+            "Type": "Task",
+            "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-process-clip",
+            "Comment": "Extract clip, convert to 9:16, add subtitles",
+            "End": true,
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "States.TaskFailed"
+                ],
+                "IntervalSeconds": 5,
+                "MaxAttempts": 2
+              }
+            ],
+            "TimeoutSeconds": 300
+          }
+        }
+      },
+      "ResultPath": "$.processed_clips",
+      "Next": "FinalizeResults"
+    },
+    "FinalizeResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-finalize",
+      "Comment": "Generate download URLs and save results",
+      "Parameters": {
+        "session_id.$": "$.session_id",
+        "processed_clips.$": "$.processed_clips",
+        "video_info.$": "$.video_info",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email"
+      },
+      "End": true,
+      "TimeoutSeconds": 30
+    },
+    "NoClipsFound": {
+      "Type": "Fail",
+      "Error": "NoClipsDetected",
+      "Cause": "No viral clips found in the video"
+    },
+    "HandleError": {
+      "Type": "Pass",
+      "Parameters": {
+        "session_id.$": "$.session_id",
+        "status": "failed",
+        "error.$": "$.error",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email"
+      },
+      "End": true
+    }
+  }
+}
