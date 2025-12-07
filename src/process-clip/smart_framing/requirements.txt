@@ -1,0 +1,33 @@
+# Smart Framing Module Requirements
+
+# Core dependencies (fixed versions for compatibility)
+opencv-python>=4.8.0
+numpy==1.24.3
+scipy>=1.10.0
+protobuf==3.20.3  # Required by MediaPipe
+
+# Face Detection - MediaPipe (original, lightweight)
+mediapipe>=0.10.0
+
+# Face Detection - MTCNN (RECOMMENDED for Lambda - ~25MB, good accuracy)
+# Option 1: Use mtcnn with TensorFlow (if you need MTCNN)
+# mtcnn>=0.1.1
+# tensorflow==2.15.0  # Compatible with protobuf 3.20.3
+
+# Option 2: OR use opencv-dnn-based MTCNN (lightweight, no TensorFlow needed)
+# Install with: pip install opencv-contrib-python
+
+# Face Detection - RetinaFace (best accuracy but ~500MB - NOT for Lambda)
+# retina-face>=0.0.13  # Uncomment only if NOT deploying to Lambda
+
+# Optional: For GPU acceleration (if available and NOT on Lambda)
+# tensorflow-gpu>=2.12.0
+
+# Video processing
+# ffmpeg-python>=0.2.0  # If using Python wrapper instead of subprocess
+
+# Lambda Deployment Notes:
+# For AWS Lambda:
+# 1. Use MediaPipe Improved (most compatible, ~30MB)
+# 2. Or use opencv-dnn based face detection
+# Avoid TensorFlow on Lambda due to size (~200-300MB)
