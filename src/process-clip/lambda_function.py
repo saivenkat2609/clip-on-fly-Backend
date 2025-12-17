@@ -1,13 +1,30 @@
 """
-Lambda Function 4: Process Individual Clip (MULTI-ASPECT RATIO)
+Lambda Function 4: Process Individual Clip (MULTI-ASPECT RATIO + SMART FRAMING)
 Extracts clip, converts to multiple aspect ratios (9:16, 16:9, 1:1), and adds KARAOKE subtitles
 SUPPORTS: Vertical (9:16), Horizontal (16:9), Square (1:1)
+NEW: Smart framing with face detection and speaker tracking
 """
 import json
 import boto3
 import os
 import subprocess
 import time
+
+# Smart Framing imports (optional - graceful fallback if not available)
+try:
+    from smart_framing import (
+        create_detector,
+        correlate_faces_with_speech,
+        calculate_smart_crop,
+        process_clip_with_smart_framing,
+        create_subtitles,
+        ASPECT_RATIOS as SMART_ASPECT_RATIOS
+    )
+    SMART_FRAMING_AVAILABLE = True
+    print("[SmartFraming] Smart framing module loaded successfully")
+except ImportError as e:
+    SMART_FRAMING_AVAILABLE = False
+    print(f"[SmartFraming] Smart framing not available: {e}")
 
 def get_storage_client():
     """Get S3-compatible storage client"""
@@ -27,11 +44,14 @@ def get_storage_client():
 
 s3 = get_storage_client()
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
-FFMPEG_PATH = os.environ.get('FFMPEG_PATH', '/opt/bin/ffmpeg')
-FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/opt/bin/ffprobe')
+FFMPEG_PATH = os.environ.get('FFMPEG_PATH', '/usr/local/bin/ffmpeg')
+FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/usr/local/bin/ffprobe')
 
 # ALWAYS enable karaoke subtitles (no env variable needed - always True)
 ADD_SUBTITLES = True  # Karaoke subtitles always enabled
+
+# Smart Framing toggle (set ENABLE_SMART_FRAMING=true to enable)
+ENABLE_SMART_FRAMING = os.environ.get('ENABLE_SMART_FRAMING', 'false').lower() == 'true'
 
 # Aspect ratio from environment variable (default: 9:16 for vertical/shorts)
 DEFAULT_ASPECT_RATIO = os.environ.get('ASPECT_RATIO', '9:16')
@@ -174,6 +194,7 @@ def lambda_handler(event, context):
         print(f"[ProcessClip] Clip {clip_index}: {clip['start']:.1f}s - {clip['end']:.1f}s")
         print(f"[ProcessClip] Aspect ratio: {aspect_ratio} (from env)")
         print(f"[ProcessClip] Subtitles enabled: {ADD_SUBTITLES}")
+        print(f"[ProcessClip] Smart framing: {ENABLE_SMART_FRAMING and SMART_FRAMING_AVAILABLE}")
         print(f"[ProcessClip] Environment: {'Lambda' if is_lambda else 'Local'}")
         print(f"[TIMING] Lambda start")
 
@@ -200,58 +221,81 @@ def lambda_handler(event, context):
         # Final output path
         final_clip_path = f"/tmp/clip_{clip_index}.mp4"
 
-        # Process with karaoke subtitles and specified aspect ratio
+        # Process with smart framing or traditional cropping
         start_process = time.time()
 
-        # Check if we have word-level timestamps for karaoke
-        has_word_timestamps = (
-            ADD_SUBTITLES and
-            clip.get('segments') and
-            any(seg.get('words') for seg in clip['segments'])
+        # Check if smart framing is enabled and available
+        use_smart_framing = (
+            ENABLE_SMART_FRAMING and
+            SMART_FRAMING_AVAILABLE and
+            clip.get('segments')  # Need transcript for speaker tracking
         )
 
-        print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
-        print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
-        print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
-
-        if ADD_SUBTITLES and clip.get('segments'):
-            if has_word_timestamps:
-                print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
-                process_clip_with_karaoke_subtitles(
-                    local_video_path,
-                    clip,
-                    final_clip_path,
-                    aspect_ratio,
-                    video_width,
-                    video_height,
-                    is_lambda
-                )
-            else:
-                print(f"[ProcessClip] Processing with SIMPLE subtitles (segment-level)...")
-                process_clip_with_simple_subtitles(
-                    local_video_path,
-                    clip,
-                    final_clip_path,
-                    aspect_ratio,
-                    video_width,
-                    video_height,
-                    is_lambda
-                )
-        else:
-            if not ADD_SUBTITLES:
-                print(f"[ProcessClip] Skipping subtitles: ADD_SUBTITLES is False")
-            elif not clip.get('segments'):
-                print(f"[ProcessClip] Skipping subtitles: No segments provided")
-            print(f"[ProcessClip] Processing without subtitles (fast)...")
-            extract_clip_no_subs(
+        if use_smart_framing:
+            print(f"[ProcessClip] Processing with SMART FRAMING + subtitles...")
+            process_clip_with_smart_framing_lambda(
                 local_video_path,
-                clip['start'],
-                clip['end'],
+                clip,
                 final_clip_path,
                 aspect_ratio,
                 video_width,
-                video_height
+                video_height,
+                is_lambda
             )
+        else:
+            # Traditional center-crop processing
+            if not ENABLE_SMART_FRAMING:
+                print(f"[ProcessClip] Smart framing disabled (set ENABLE_SMART_FRAMING=true to enable)")
+            elif not SMART_FRAMING_AVAILABLE:
+                print(f"[ProcessClip] Smart framing module not available, using center crop")
+            elif not clip.get('segments'):
+                print(f"[ProcessClip] No transcript segments, using center crop")
+
+            # Check if we have word-level timestamps for karaoke
+            has_word_timestamps = (
+                ADD_SUBTITLES and
+                clip.get('segments') and
+                any(seg.get('words') for seg in clip['segments'])
+            )
+
+            if ADD_SUBTITLES and clip.get('segments'):
+                if has_word_timestamps:
+                    print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
+                    process_clip_with_karaoke_subtitles(
+                        local_video_path,
+                        clip,
+                        final_clip_path,
+                        aspect_ratio,
+                        video_width,
+                        video_height,
+                        is_lambda
+                    )
+                else:
+                    print(f"[ProcessClip] Processing with SIMPLE subtitles (segment-level)...")
+                    process_clip_with_simple_subtitles(
+                        local_video_path,
+                        clip,
+                        final_clip_path,
+                        aspect_ratio,
+                        video_width,
+                        video_height,
+                        is_lambda
+                    )
+            else:
+                if not ADD_SUBTITLES:
+                    print(f"[ProcessClip] Skipping subtitles: ADD_SUBTITLES is False")
+                elif not clip.get('segments'):
+                    print(f"[ProcessClip] Skipping subtitles: No segments provided")
+                print(f"[ProcessClip] Processing without subtitles (fast)...")
+                extract_clip_no_subs(
+                    local_video_path,
+                    clip['start'],
+                    clip['end'],
+                    final_clip_path,
+                    aspect_ratio,
+                    video_width,
+                    video_height
+                )
 
         process_time = time.time() - start_process
 
@@ -373,7 +417,7 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
     if not os.path.exists(ass_path):
         raise Exception(f"ASS file not created at {ass_path}")
 
-    # FFmpeg command with aspect ratio support and audio/video sync fixes
+    # FFmpeg command with aspect ratio support and FIXED subtitle sync
     cmd = [
         FFMPEG_PATH,
         '-ss', str(start_time),
@@ -383,22 +427,25 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '28',
+        '-pix_fmt', 'yuv420p',  # Maximum compatibility
         '-c:a', 'aac',
         '-b:a', '96k',
         '-ar', '44100',
         '-ac', '2',
         '-max_muxing_queue_size', '1024',
-        '-async', '1',
-        '-vsync', 'cfr',
         '-movflags', '+faststart',
-        '-avoid_negative_ts', 'make_zero',
         '-threads', '0',
         '-y',
         output_path
     ]
 
     print(f"[Karaoke] Running FFmpeg with karaoke subtitles...")
+    print(f"[Karaoke] Command: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
+
+    print(f"[Karaoke] FFmpeg return code: {result.returncode}")
+    if result.stderr:
+        print(f"[Karaoke] FFmpeg stderr (last 500 chars): {result.stderr[-500:]}")
 
     if result.returncode != 0:
         print(f"[Karaoke] FFmpeg error: {result.stderr}")
@@ -435,6 +482,7 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         FFMPEG_PATH,
         '-ss', str(start_time),
         '-i', video_path,
+        '-ss', '0',  # Accurate seek for subtitle sync
         '-t', str(duration),
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height},subtitles={ass_path}',
         '-c:v', 'libx264',
@@ -445,10 +493,10 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         '-ar', '44100',
         '-ac', '2',
         '-max_muxing_queue_size', '1024',
-        '-async', '1',
-        '-vsync', 'cfr',
+        '-vsync', '2',  # VFR - prevents subtitle drift
+        '-copyts',  # Preserve timestamps for subtitle sync
+        '-start_at_zero',  # Normalize output timestamps
         '-movflags', '+faststart',
-        '-avoid_negative_ts', 'make_zero',
         '-threads', '0',
         '-y',
         output_path
@@ -467,6 +515,115 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
     return output_path
 
 
+def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False):
+    """
+    SMART FRAMING VERSION: Face detection + speaker tracking + dynamic crop + subtitles
+    Uses the smart_framing module for intelligent speaker-focused cropping
+    """
+    start_time = clip['start']
+    end_time = clip['end']
+    duration = end_time - start_time
+
+    print(f"[SmartFraming] Processing with face detection and speaker tracking...")
+    print(f"[SmartFraming] Aspect ratio: {aspect_ratio}")
+    print(f"[SmartFraming] Duration: {duration:.2f}s")
+
+    try:
+        # Step 1: Face detection
+        print(f"[SmartFraming] Step 1/4: Face detection...")
+        detector = create_detector('mediapipe_improved', model_dir='/tmp/mediapipe_models')
+
+        face_timeline = detector.detect_faces_in_video(
+            video_path,
+            start_sec=start_time,
+            end_sec=end_time,
+            sample_rate=5  # Sample every 5 frames for Lambda
+        )
+
+        print(f"[SmartFraming] Detected faces in {len(face_timeline)} frames")
+
+        # Step 2: Speaker correlation
+        print(f"[SmartFraming] Step 2/4: Correlating faces with speech...")
+        speaker_activity = correlate_faces_with_speech(
+            face_timeline,
+            clip['segments'],
+            clip_start=start_time
+        )
+
+        # Step 3: Calculate smart crop
+        print(f"[SmartFraming] Step 3/4: Calculating smart crop timeline...")
+        crop_timeline, crop_dims = calculate_smart_crop(
+            speaker_activity,
+            video_width,
+            video_height,
+            target_aspect=aspect_ratio,
+            padding_ratio=0.15,
+            smoothing_sigma=0.5,
+            face_timeline=face_timeline,
+            enable_motion_keyframes=True,
+            motion_threshold=100,
+            max_keyframe_interval=3.0,
+            use_sticky_crop=True,  # Enable sticky crop for stable framing
+            dead_zone_radius=150
+        )
+
+        print(f"[SmartFraming] Generated {len(crop_timeline)} keyframes")
+
+        # Step 4: Create subtitles
+        print(f"[SmartFraming] Step 4/4: Creating subtitles...")
+        ass_path = f"/tmp/clip_{clip['clip_index']}_smart.ass"
+
+        has_word_timestamps = any(seg.get('words') for seg in clip['segments'])
+        subtitle_mode = 'karaoke' if has_word_timestamps else 'simple'
+
+        create_subtitles(
+            segments=clip['segments'],
+            clip_start=start_time,
+            output_path=ass_path,
+            mode=subtitle_mode,
+            is_lambda=is_lambda
+        )
+
+        # Get target dimensions
+        config = ASPECT_RATIOS[aspect_ratio]
+        target_width = config['width']
+        target_height = config['height']
+
+        # Process with smart framing module's FFmpeg integration
+        print(f"[SmartFraming] Processing video with {len(crop_timeline)} crop keyframes...")
+
+        from smart_framing.ffmpeg_smart_crop import process_clip_with_smart_framing as smart_frame_process
+
+        smart_frame_process(
+            video_path=video_path,
+            output_path=output_path,
+            clip_start=start_time,
+            clip_end=end_time,
+            crop_timeline=crop_timeline,
+            crop_dims=crop_dims,
+            target_dims=(target_width, target_height),
+            subtitle_path=ass_path,
+            stabilize=False,  # Disable stabilization for Lambda (too slow)
+            preset='ultrafast'  # Fastest preset for Lambda
+        )
+
+        # Clean up
+        if os.path.exists(ass_path):
+            os.remove(ass_path)
+
+        print(f"[SmartFraming] ✓ Smart framing complete!")
+        return output_path
+
+    except Exception as e:
+        print(f"[SmartFraming] Error: {e}")
+        print(f"[SmartFraming] Falling back to center crop...")
+        # Fallback to traditional processing
+        return process_clip_with_karaoke_subtitles(
+            video_path, clip, output_path, aspect_ratio,
+            video_width, video_height, is_lambda
+        )
+
+
 def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_ratio, video_width, video_height):
     """
     Extract clip with aspect ratio conversion (no subtitles)
@@ -481,6 +638,7 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
         FFMPEG_PATH,
         '-ss', str(start_time),
         '-i', video_path,
+        '-ss', '0',  # Accurate seek
         '-t', str(duration),
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height}',
         '-c:v', 'libx264',
@@ -491,10 +649,10 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
         '-ar', '44100',
         '-ac', '2',
         '-max_muxing_queue_size', '1024',
-        '-async', '1',
-        '-vsync', 'cfr',
+        '-vsync', '2',  # VFR
+        '-copyts',
+        '-start_at_zero',
         '-movflags', '+faststart',
-        '-avoid_negative_ts', 'make_zero',
         '-threads', '0',
         '-y',
         output_path
