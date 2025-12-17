@@ -124,14 +124,14 @@ class ImprovedMediaPipeFaceDetector:
 
         frame_results = []
         frame_count = 0
-        current_time = start_sec
+        current_time = 0  # Use relative timestamps (0.00s = clip start)
         faces_detected_count = 0
         false_positives_filtered = 0
 
         # Reset temporal tracking
         self.previous_faces = []
 
-        while current_time < end_sec:
+        while start_sec + current_time < end_sec:
             ret, frame = cap.read()
             if not ret:
                 print(f"[ImprovedMediaPipe] End of video at frame {frame_count}")
@@ -196,7 +196,7 @@ class ImprovedMediaPipeFaceDetector:
                 })
 
             frame_count += 1
-            current_time = start_sec + (frame_count / fps)
+            current_time = frame_count / fps  # Relative time from clip start
 
         cap.release()
 

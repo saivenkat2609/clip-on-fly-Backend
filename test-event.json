@@ -1,0 +1,358 @@
+{
+  "user_email": "gvijay4004@gmail.com",
+  "user_id": "FwSB2aSQPPVTvKQjluICnCM7hmX2",
+  "session_id": "85afa2c4-d26d-40a3-83d8-5a6f5a3c9c03",
+  "s3_video_key": "85afa2c4-d26d-40a3-83d8-5a6f5a3c9c03/original_video.mp4",
+  "clip": {
+    "start": 31.28,
+    "end": 46.94,
+    "duration": 15.659999999999997,
+    "text": "First time trying coconut water.  Probably tastes like it's not.  Doesn't taste at all like.  Tastes like water.  Yeah, but  it's like, with a little bit of, like, flavor.  Yeah,  flavor.  Yeah, a little bit of flavor.  I thought it  was gonna taste like.  Like a little booty do or ",
+    "segments": [
+      {
+        "start": 31.28,
+        "end": 32.86,
+        "text": "First time trying coconut water. ",
+        "words": [
+          {
+            "word": "First",
+            "start": 31.28,
+            "end": 31.48
+          },
+          {
+            "word": "time",
+            "start": 31.48,
+            "end": 31.76
+          },
+          {
+            "word": "trying",
+            "start": 31.98,
+            "end": 32.18
+          },
+          {
+            "word": "coconut",
+            "start": 32.18,
+            "end": 32.62
+          },
+          {
+            "word": "water.",
+            "start": 32.62,
+            "end": 32.86
+          }
+        ]
+      },
+      {
+        "start": 32.94,
+        "end": 35.62,
+        "text": "Probably tastes like it's not. ",
+        "words": [
+          {
+            "word": "Probably",
+            "start": 32.94,
+            "end": 33.3
+          },
+          {
+            "word": "tastes",
+            "start": 33.3,
+            "end": 33.58
+          },
+          {
+            "word": "like",
+            "start": 33.58,
+            "end": 33.82
+          },
+          {
+            "word": "it's",
+            "start": 34.94,
+            "end": 35.34
+          },
+          {
+            "word": "not.",
+            "start": 35.34,
+            "end": 35.62
+          }
+        ]
+      },
+      {
+        "start": 35.62,
+        "end": 37.1,
+        "text": "Doesn't taste at all like. ",
+        "words": [
+          {
+            "word": "Doesn't",
+            "start": 35.62,
+            "end": 36.06
+          },
+          {
+            "word": "taste",
+            "start": 36.06,
+            "end": 36.38
+          },
+          {
+            "word": "at",
+            "start": 36.38,
+            "end": 36.58
+          },
+          {
+            "word": "all",
+            "start": 36.58,
+            "end": 36.78
+          },
+          {
+            "word": "like.",
+            "start": 36.78,
+            "end": 37.1
+          }
+        ]
+      },
+      {
+        "start": 39.34,
+        "end": 40.3,
+        "text": "Tastes like water. ",
+        "words": [
+          {
+            "word": "Tastes",
+            "start": 39.34,
+            "end": 39.78
+          },
+          {
+            "word": "like",
+            "start": 39.78,
+            "end": 39.98
+          },
+          {
+            "word": "water.",
+            "start": 39.98,
+            "end": 40.3
+          }
+        ]
+      },
+      {
+        "start": 40.62,
+        "end": 41.06,
+        "text": "Yeah, but ",
+        "words": [
+          {
+            "word": "Yeah,",
+            "start": 40.62,
+            "end": 40.94
+          },
+          {
+            "word": "but",
+            "start": 40.94,
+            "end": 41.06
+          }
+        ]
+      },
+      {
+        "start": 41.06,
+        "end": 42.86,
+        "text": "it's like, with a little bit of, like, flavor. ",
+        "words": [
+          {
+            "word": "it's",
+            "start": 41.06,
+            "end": 41.26
+          },
+          {
+            "word": "like,",
+            "start": 41.26,
+            "end": 41.42
+          },
+          {
+            "word": "with",
+            "start": 41.42,
+            "end": 41.62
+          },
+          {
+            "word": "a",
+            "start": 41.62,
+            "end": 41.74
+          },
+          {
+            "word": "little",
+            "start": 41.74,
+            "end": 41.86
+          },
+          {
+            "word": "bit",
+            "start": 41.86,
+            "end": 42.02
+          },
+          {
+            "word": "of,",
+            "start": 42.02,
+            "end": 42.18
+          },
+          {
+            "word": "like,",
+            "start": 42.18,
+            "end": 42.42
+          },
+          {
+            "word": "flavor.",
+            "start": 42.42,
+            "end": 42.86
+          }
+        ]
+      },
+      {
+        "start": 42.86,
+        "end": 43.14,
+        "text": "Yeah, ",
+        "words": [
+          {
+            "word": "Yeah,",
+            "start": 42.86,
+            "end": 43.14
+          }
+        ]
+      },
+      {
+        "start": 43.14,
+        "end": 43.46,
+        "text": "flavor. ",
+        "words": [
+          {
+            "word": "flavor.",
+            "start": 43.14,
+            "end": 43.46
+          }
+        ]
+      },
+      {
+        "start": 43.46,
+        "end": 44.3,
+        "text": "Yeah, a little bit of flavor. ",
+        "words": [
+          {
+            "word": "Yeah,",
+            "start": 43.46,
+            "end": 43.66
+          },
+          {
+            "word": "a",
+            "start": 43.66,
+            "end": 43.74
+          },
+          {
+            "word": "little",
+            "start": 43.74,
+            "end": 43.82
+          },
+          {
+            "word": "bit",
+            "start": 43.82,
+            "end": 43.9
+          },
+          {
+            "word": "of",
+            "start": 43.9,
+            "end": 43.98
+          },
+          {
+            "word": "flavor.",
+            "start": 43.98,
+            "end": 44.3
+          }
+        ]
+      },
+      {
+        "start": 44.3,
+        "end": 44.66,
+        "text": "I thought it ",
+        "words": [
+          {
+            "word": "I",
+            "start": 44.3,
+            "end": 44.46
+          },
+          {
+            "word": "thought",
+            "start": 44.46,
+            "end": 44.54
+          },
+          {
+            "word": "it",
+            "start": 44.54,
+            "end": 44.66
+          }
+        ]
+      },
+      {
+        "start": 44.66,
+        "end": 45.34,
+        "text": "was gonna taste like. ",
+        "words": [
+          {
+            "word": "was",
+            "start": 44.66,
+            "end": 44.78
+          },
+          {
+            "word": "gonna",
+            "start": 44.78,
+            "end": 44.94
+          },
+          {
+            "word": "taste",
+            "start": 44.94,
+            "end": 45.1
+          },
+          {
+            "word": "like.",
+            "start": 45.1,
+            "end": 45.34
+          }
+        ]
+      },
+      {
+        "start": 45.58,
+        "end": 46.94,
+        "text": "Like a little booty do or ",
+        "words": [
+          {
+            "word": "Like",
+            "start": 45.58,
+            "end": 45.86
+          },
+          {
+            "word": "a",
+            "start": 45.86,
+            "end": 45.98
+          },
+          {
+            "word": "little",
+            "start": 45.98,
+            "end": 46.14
+          },
+          {
+            "word": "booty",
+            "start": 46.14,
+            "end": 46.58
+          },
+          {
+            "word": "do",
+            "start": 46.58,
+            "end": 46.78
+          },
+          {
+            "word": "or",
+            "start": 46.78,
+            "end": 46.94
+          }
+        ]
+      }
+    ],
+    "virality_score": 85,
+    "score_breakdown": {
+      "hook": 80,
+      "flow": 90,
+      "engagement": 92,
+      "trend": 88
+    },
+    "score": 85,
+    "clip_index": 0,
+    "title": "What Coconut Water Really Tastes Like"
+  }
+}

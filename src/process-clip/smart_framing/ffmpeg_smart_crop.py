@@ -18,9 +18,8 @@ from typing import List, Dict, Tuple, Optional
 from .ffmpeg_smart_crop_optimized import optimize_crop_timeline
 
 
-# FFmpeg binary path (Lambda uses /opt/bin/ffmpeg from layer)
-FFMPEG_PATH = 'C:/Users/GourabaV/AppData/Local/Cypress/Cache/8.7.0/Cypress/resources/app/packages/server/node_modules/@ffmpeg-installer/win32-x64/ffmpeg.exe'
-
+# FFmpeg binary path (get from environment or use Lambda default)
+FFMPEG_PATH = os.environ.get('FFMPEG_PATH', '/usr/local/bin/ffmpeg')
 
 print(f"[FFmpegSmartCrop] Using FFmpeg binary at: {FFMPEG_PATH}")
 def process_clip_with_smart_framing(
@@ -279,22 +278,20 @@ def build_ffmpeg_command(
 
     cmd = [
         FFMPEG_PATH,
-        '-ss', str(start_sec),           # Seek to start
+        '-ss', str(start_sec),           # Seek to start position
         '-i', input_path,                 # Input file
         '-t', str(duration),              # Duration
         '-vf', filter_complex,            # Video filters
         '-c:v', 'libx264',               # Video codec
         '-preset', preset,                # Encoding preset
-        '-crf', '20',                     # Quality (18-28, lower = better) - IMPROVED from 23
+        '-crf', '20',                     # Quality (18-28, lower = better)
+        '-pix_fmt', 'yuv420p',           # Pixel format (maximum compatibility)
         '-c:a', 'aac',                   # Audio codec
         '-b:a', '128k',                  # Audio bitrate
         '-ar', '44100',                  # Audio sample rate
         '-ac', '2',                      # Audio channels (stereo)
         '-max_muxing_queue_size', '1024', # Prevent muxing errors
-        '-async', '1',                   # Audio sync
-        '-vsync', 'cfr',                 # Constant frame rate
         '-movflags', '+faststart',       # Web-optimized MP4
-        '-avoid_negative_ts', 'make_zero', # Timestamp handling
         '-threads', '0',                 # Use all CPU threads
         '-y',                            # Overwrite output
         output_path

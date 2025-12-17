@@ -36,7 +36,9 @@ def calculate_smart_crop(
     face_timeline: List[Dict] = None,
     enable_motion_keyframes: bool = True,
     motion_threshold: int = 100,
-    max_keyframe_interval: float = 3.0
+    max_keyframe_interval: float = 3.0,
+    use_sticky_crop: bool = True,
+    dead_zone_radius: int = 150
 ) -> Tuple[List[Dict], Tuple[int, int]]:
     """
     Calculate dynamic crop coordinates to follow active speaker.
@@ -56,6 +58,8 @@ def calculate_smart_crop(
         enable_motion_keyframes: Enable motion-based keyframe generation
         motion_threshold: Minimum face movement (pixels) to create keyframe
         max_keyframe_interval: Maximum time (seconds) between keyframes
+        use_sticky_crop: Enable sticky crop (locks position until face moves out of dead zone)
+        dead_zone_radius: Radius (pixels) from crop center where face can move without update
 
     Returns:
         Tuple of:
@@ -65,7 +69,9 @@ def calculate_smart_crop(
     print(f"[SmartCrop] Calculating smart crop for {len(speaker_activity)} segments")
     print(f"[SmartCrop] Video: {video_width}x{video_height}, Target: {target_aspect}")
     if enable_motion_keyframes:
-        print(f"[SmartCrop] Motion tracking enabled: threshold={motion_threshold}px, interval={max_keyframe_interval}s")
+        if use_sticky_crop:
+            print(f"[SmartCrop] STICKY CROP enabled: dead_zone={dead_zone_radius}px (locks until face leaves center)")
+        print(f"[SmartCrop] Motion tracking: threshold={motion_threshold}px, interval={max_keyframe_interval}s")
 
     if not speaker_activity:
         # No speaker activity - use center crop
@@ -130,7 +136,9 @@ def calculate_smart_crop(
             video_height,
             padding_ratio,
             motion_threshold,
-            max_keyframe_interval
+            max_keyframe_interval,
+            use_sticky_crop,
+            dead_zone_radius
         )
         crop_timeline.extend(motion_keyframes)
 
@@ -321,13 +329,22 @@ def generate_motion_keyframes(
     video_height: int,
     padding_ratio: float,
     motion_threshold: int,
-    max_keyframe_interval: float
+    max_keyframe_interval: float,
+    use_sticky_crop: bool = True,
+    dead_zone_radius: int = 150
 ) -> List[Dict]:
     """
     Generate additional keyframes based on face movement within segments.
 
-    This function detects when a face moves significantly during a speaking
-    segment and creates intermediate keyframes to follow the movement.
+    STICKY CROP MODE (use_sticky_crop=True):
+    - Locks crop position until face moves outside dead zone from crop center
+    - Dead zone = radius from center of current crop where face can move freely
+    - Only updates when face leaves the dead zone
+    - Creates stable, non-jittery footage
+
+    LEGACY MODE (use_sticky_crop=False):
+    - Creates keyframe based on movement from last face position
+    - More responsive but can be jittery
 
     Args:
         speaker_activity: Speaker activity periods
@@ -335,8 +352,10 @@ def generate_motion_keyframes(
         crop_w, crop_h: Crop dimensions
         video_width, video_height: Video dimensions
         padding_ratio: Padding around face
-        motion_threshold: Minimum movement (pixels) to trigger keyframe
+        motion_threshold: Minimum movement (pixels) to trigger keyframe (legacy mode only)
         max_keyframe_interval: Maximum time between keyframes (seconds)
+        use_sticky_crop: Enable sticky crop mode (recommended)
+        dead_zone_radius: Radius from crop center where face can move without update
 
     Returns:
         List of motion-based keyframes
@@ -383,7 +402,9 @@ def generate_motion_keyframes(
 
         # Track position and detect motion
         last_keyframe_time = seg_start
-        last_face_center = None
+        locked_crop_x = None
+        locked_crop_y = None
+        last_face_center = None  # For legacy mode
 
         for timestamp, face in segment_faces:
             bbox = face['bbox']
@@ -392,25 +413,55 @@ def generate_motion_keyframes(
                 bbox['y'] + bbox['h'] // 2
             )
 
-            # Initialize on first face
-            if last_face_center is None:
+            # Initialize on first face - establish initial locked position
+            if locked_crop_x is None:
+                # Calculate initial crop position
+                locked_crop_x, locked_crop_y = calculate_crop_position(
+                    current_center[0],
+                    current_center[1],
+                    bbox['w'],
+                    bbox['h'],
+                    crop_w,
+                    crop_h,
+                    video_width,
+                    video_height,
+                    padding_ratio
+                )
                 last_face_center = current_center
                 continue
-
-            # Calculate movement distance
-            distance = np.sqrt(
-                (current_center[0] - last_face_center[0]) ** 2 +
-                (current_center[1] - last_face_center[1]) ** 2
-            )
 
             # Time since last keyframe
             time_since_last = timestamp - last_keyframe_time
 
-            # Create keyframe if motion threshold exceeded OR time interval exceeded
-            should_create_keyframe = (
-                distance >= motion_threshold or
-                time_since_last >= max_keyframe_interval
-            )
+            if use_sticky_crop:
+                # STICKY CROP MODE: Check if face moved outside dead zone from CROP CENTER
+                crop_center_x = locked_crop_x + crop_w // 2
+                crop_center_y = locked_crop_y + crop_h // 2
+
+                # Distance from face to center of current locked crop
+                distance_from_crop_center = np.sqrt(
+                    (current_center[0] - crop_center_x) ** 2 +
+                    (current_center[1] - crop_center_y) ** 2
+                )
+
+                # Create keyframe if face left dead zone OR time interval exceeded
+                should_create_keyframe = (
+                    distance_from_crop_center >= dead_zone_radius or
+                    time_since_last >= max_keyframe_interval
+                )
+                distance = distance_from_crop_center  # For logging
+            else:
+                # LEGACY MODE: Check movement from last face position
+                distance = np.sqrt(
+                    (current_center[0] - last_face_center[0]) ** 2 +
+                    (current_center[1] - last_face_center[1]) ** 2
+                )
+
+                # Create keyframe if motion threshold exceeded OR time interval exceeded
+                should_create_keyframe = (
+                    distance >= motion_threshold or
+                    time_since_last >= max_keyframe_interval
+                )
 
             if should_create_keyframe:
                 # Calculate crop position for this face
@@ -432,7 +483,11 @@ def generate_motion_keyframes(
                           f"crop=({crop_x},{crop_y}), face_center={current_center}, "
                           f"bbox=({bbox['x']},{bbox['y']},{bbox['w']},{bbox['h']})")
 
-                reason = f'Motion {distance:.0f}px' if distance >= motion_threshold else 'Time interval'
+                # Determine reason for keyframe
+                if use_sticky_crop:
+                    reason = f'Left dead zone ({distance:.0f}px)' if distance >= dead_zone_radius else 'Time interval'
+                else:
+                    reason = f'Motion {distance:.0f}px' if distance >= motion_threshold else 'Time interval'
 
                 motion_keyframes.append({
                     'timestamp': timestamp,
@@ -448,13 +503,18 @@ def generate_motion_keyframes(
                 })
 
                 # Debug: Print first few motion keyframes
-                if len(motion_keyframes) <= 3:
-                    print(f"[MotionTracking] Keyframe #{len(motion_keyframes)} at t={timestamp:.2f}s: "
+                if len(motion_keyframes) <= 5:
+                    mode = "STICKY" if use_sticky_crop else "LEGACY"
+                    print(f"[MotionTracking] {mode} Keyframe #{len(motion_keyframes)} at t={timestamp:.2f}s: "
                           f"face_center={current_center}, crop=({crop_x},{crop_y}), reason={reason}")
 
                 # Update tracking
                 last_keyframe_time = timestamp
                 last_face_center = current_center
+
+                # Update locked crop position (sticky mode)
+                locked_crop_x = crop_x
+                locked_crop_y = crop_y
 
     print(f"[MotionTracking] Generated {len(motion_keyframes)} motion keyframes")
     return motion_keyframes

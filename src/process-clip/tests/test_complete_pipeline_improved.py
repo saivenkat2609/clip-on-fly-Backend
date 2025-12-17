@@ -36,6 +36,7 @@ from smart_framing.face_detection_improved import ImprovedMediaPipeFaceDetector
 from smart_framing.speaker_tracking import correlate_faces_with_speech
 from smart_framing.smart_crop import calculate_smart_crop
 from smart_framing.ffmpeg_smart_crop import process_clip_with_smart_framing
+from smart_framing.subtitles import create_subtitles, has_word_timestamps
 
 
 def load_transcript_from_file(transcript_path: str, max_duration: float = None) -> list:
@@ -288,11 +289,13 @@ def test_complete_pipeline_improved(
         video_width,
         video_height,
         target_aspect=target_aspect,
-        smoothing_sigma=0.3,           # REDUCED: Less smoothing = sharper tracking (was 0.5)
+        smoothing_sigma=0.5,           # Smooth transitions
         face_timeline=detections,      # Pass for motion tracking
         enable_motion_keyframes=True,
-        motion_threshold=50,           # REDUCED: More responsive to movement (was 100)
-        max_keyframe_interval=2.0      # REDUCED: More frequent updates (was 3.0)
+        motion_threshold=100,          # Legacy threshold (not used in sticky mode)
+        max_keyframe_interval=5.0,     # Maximum time before forced update
+        use_sticky_crop=True,          # 🎯 STICKY CROP: Locks position until face leaves center
+        dead_zone_radius=150           # 🎯 DEAD ZONE: 150px radius from crop center
     )
     phase3_time = time.time() - phase3_start
 
@@ -320,10 +323,54 @@ def test_complete_pipeline_improved(
     print()
 
     # ========================================================================
-    # PHASE 4: FFMPEG PROCESSING
+    # PHASE 3.5: SUBTITLE CREATION
     # ========================================================================
     print("=" * 80)
-    print("PHASE 4: FFMPEG PROCESSING")
+    print("PHASE 3.5: SUBTITLE CREATION (KARAOKE)")
+    print("=" * 80)
+    print()
+
+    subtitle_path = None
+
+    if transcript_segments and len(transcript_segments) > 0:
+        subtitle_output = output_dir / "subtitles.ass"
+
+        # Check if we have word-level timestamps
+        has_words = has_word_timestamps(transcript_segments)
+        subtitle_mode = 'karaoke' if has_words else 'simple'
+
+        print(f"📝 Subtitle mode: {subtitle_mode}")
+        print(f"   Word-level timestamps: {has_words}")
+        print(f"   Segments: {len(transcript_segments)}")
+
+        phase35_start = time.time()
+
+        try:
+            subtitle_path = create_subtitles(
+                segments=transcript_segments,
+                clip_start=0,
+                output_path=str(subtitle_output),
+                mode=subtitle_mode,
+                is_lambda=False  # Local testing
+            )
+
+            phase35_time = time.time() - phase35_start
+
+            print(f"✅ Subtitles created: {subtitle_path}")
+            print(f"⏱️  Phase 3.5 time: {phase35_time:.2f}s")
+        except Exception as e:
+            print(f"⚠️  Subtitle creation failed: {e}")
+            subtitle_path = None
+    else:
+        print("⚠️  No transcript segments available, skipping subtitles")
+
+    print()
+
+    # ========================================================================
+    # PHASE 4: FFMPEG PROCESSING (WITH SUBTITLES)
+    # ========================================================================
+    print("=" * 80)
+    print("PHASE 4: FFMPEG PROCESSING (WITH SUBTITLES)")
     print("=" * 80)
     print()
 
@@ -341,6 +388,10 @@ def test_complete_pipeline_improved(
     print(f"💾 Output path: {output_path}")
     print(f"🎬 Target dimensions: {target_dims[0]}x{target_dims[1]}")
     print(f"🎯 Applying {len(crop_timeline)} crop keyframes")
+    if subtitle_path:
+        print(f"📝 Subtitles: {subtitle_path}")
+    else:
+        print(f"📝 Subtitles: None")
     print()
 
     phase4_start = time.time()
@@ -353,9 +404,9 @@ def test_complete_pipeline_improved(
             crop_timeline=crop_timeline,
             crop_dims=crop_dims,
             target_dims=target_dims,
-            subtitle_path=None,
-            stabilize=False,          # DISABLED: Prevents edge blur (was True)
-            preset='medium'           # BETTER QUALITY: Sharper output (was 'fast')
+            subtitle_path=subtitle_path,  # 📝 SUBTITLES: Pass subtitle ASS file
+            stabilize=False,              # DISABLED: Prevents edge blur (was True)
+            preset='medium'               # BETTER QUALITY: Sharper output (was 'fast')
         )
     except Exception as e:
         print(f"❌ ERROR during FFmpeg processing: {str(e)}")
@@ -378,12 +429,15 @@ def test_complete_pipeline_improved(
     print("=" * 80)
     print()
 
-    total_time = phase1_time + phase2_time + phase3_time + phase4_time
+    phase35_time = phase35_time if subtitle_path else 0
+    total_time = phase1_time + phase2_time + phase3_time + phase35_time + phase4_time
 
     print("📊 Performance Summary:")
     print(f"   Phase 1 (Face Detection):       {phase1_time:>6.2f}s ({phase1_time/total_time*100:>5.1f}%)")
     print(f"   Phase 2 (Speaker Correlation):  {phase2_time:>6.2f}s ({phase2_time/total_time*100:>5.1f}%)")
     print(f"   Phase 3 (Smart Crop):           {phase3_time:>6.2f}s ({phase3_time/total_time*100:>5.1f}%)")
+    if subtitle_path:
+        print(f"   Phase 3.5 (Subtitles):          {phase35_time:>6.2f}s ({phase35_time/total_time*100:>5.1f}%)")
     print(f"   Phase 4 (FFmpeg Processing):    {phase4_time:>6.2f}s ({phase4_time/total_time*100:>5.1f}%)")
     print(f"   {'-' * 60}")
     print(f"   Total:                          {total_time:>6.2f}s")
@@ -399,11 +453,12 @@ def test_complete_pipeline_improved(
         print(f"   📦 File size: {file_size_mb:.2f} MB")
     print()
 
-    print("🎯 Quality Improvements (vs Original):")
+    print("🎯 Quality Features:")
     print("   ✅ Fewer false positives (validation layer)")
     print("   ✅ Better small face detection (full-range model)")
-    print("   ✅ More stable tracking (temporal filtering)")
-    print("   ✅ Higher confidence scores")
+    print("   ✅ Sticky crop tracking (stable framing)")
+    print("   ✅ Karaoke subtitles (word-by-word highlighting)")
+    print("   ✅ Smart framing + subtitles integrated")
     print()
 
     print("📦 Lambda Deployment Ready:")
@@ -412,13 +467,13 @@ def test_complete_pipeline_improved(
     print("   ✅ Compatible dependencies")
     print()
 
-    print("🎉 SUCCESS! Improved smart framing pipeline is working!")
+    print("🎉 SUCCESS! Complete pipeline with subtitles is ready!")
     print()
     print("Next Steps:")
-    print("  1. ▶️  Play the output video to verify quality")
-    print("  2. 🔄 Compare with original pipeline output")
-    print("  3. 📊 Review face detection accuracy")
-    print("  4. 🚀 Ready for Lambda deployment!")
+    print("  1. ▶️  Play output video to verify smart framing + subtitles")
+    print("  2. 📝 Check karaoke subtitle effect and timing")
+    print("  3. 🎯 Verify sticky crop is following speaker correctly")
+    print("  4. 🚀 Ready for production deployment!")
     print()
 
     return True
