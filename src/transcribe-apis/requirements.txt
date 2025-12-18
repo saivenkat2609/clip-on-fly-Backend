@@ -1,0 +1,15 @@
+# Minimal requirements for API-only transcription Lambda
+# No Whisper model, no PyTorch - lightweight and fast!
+
+# AWS SDK
+boto3==1.34.10
+
+# HTTP requests for API calls
+requests==2.31.0
+
+# JSON handling (built-in but listed for clarity)
+# json - built-in
+# os - built-in
+# subprocess - built-in
+# time - built-in
+# warnings - built-in
