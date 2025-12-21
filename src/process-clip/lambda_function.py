@@ -9,6 +9,23 @@ import boto3
 import os
 import subprocess
 import time
+from pathlib import Path
+
+# Smart Framing imports (optional - graceful fallback if not available)
+try:
+    from smart_framing import (
+        create_detector,
+        correlate_faces_with_speech,
+        calculate_smart_crop,
+        process_clip_with_smart_framing,
+        create_subtitles,
+        ASPECT_RATIOS as SMART_ASPECT_RATIOS
+    )
+    SMART_FRAMING_AVAILABLE = True
+    print("[SmartFraming] Smart framing module loaded successfully")
+except ImportError as e:
+    SMART_FRAMING_AVAILABLE = False
+    print(f"[SmartFraming] Smart framing not available: {e}")
 
 # Smart Framing imports (optional - graceful fallback if not available)
 try:
@@ -78,6 +95,81 @@ ASPECT_RATIOS = {
         'name': 'square'
     }
 }
+
+# Template cache (loaded once per Lambda warm start)
+_TEMPLATE_CACHE = None
+
+def load_templates():
+    """Load template configurations from JSON file or S3"""
+    global _TEMPLATE_CACHE
+
+    if _TEMPLATE_CACHE is not None:
+        return _TEMPLATE_CACHE
+
+    # Try to load from local file first (bundled with Lambda)
+    template_paths = [
+        '/var/task/templates.json',
+        '/var/task/src/shared/templates.json',
+        os.path.join(os.path.dirname(__file__), '..', 'shared', 'templates.json'),
+        './templates.json'
+    ]
+
+    for path in template_paths:
+        if os.path.exists(path):
+            print(f"[Templates] Loading from: {path}")
+            with open(path, 'r') as f:
+                _TEMPLATE_CACHE = json.load(f)
+                print(f"[Templates] Loaded {len(_TEMPLATE_CACHE.get('templates', {}))} templates")
+                return _TEMPLATE_CACHE
+
+    # Fallback: Try loading from S3
+    try:
+        print("[Templates] Loading from S3...")
+        response = s3.get_object(Bucket=BUCKET_NAME, Key='config/templates.json')
+        _TEMPLATE_CACHE = json.loads(response['Body'].read())
+        print(f"[Templates] Loaded {len(_TEMPLATE_CACHE.get('templates', {}))} templates from S3")
+        return _TEMPLATE_CACHE
+    except Exception as e:
+        print(f"[Templates] Failed to load from S3: {e}")
+
+    # Final fallback: Return default template
+    print("[Templates] Using default template (no config found)")
+    _TEMPLATE_CACHE = {
+        "templates": {
+            "prof-modern-minimal": {
+                "id": "prof-modern-minimal",
+                "name": "Modern Minimal",
+                "font": "DejaVu Sans",
+                "font_size": 70,
+                "primary_color": "&H00FFFFFF",
+                "highlight_color": "&H0000CCFF",
+                "outline_color": "&H00000000",
+                "back_color": "&H80000000",
+                "outline_width": 3,
+                "shadow_depth": 2,
+                "position": "bottom",
+                "margin_v": 180,
+                "alignment": 2,
+                "bold": -1
+            }
+        }
+    }
+    return _TEMPLATE_CACHE
+
+def get_template(template_id):
+    """Get specific template by ID"""
+    templates_config = load_templates()
+    templates = templates_config.get('templates', {})
+
+    # Return requested template or default
+    template = templates.get(template_id, templates.get('prof-modern-minimal'))
+
+    if template_id not in templates:
+        print(f"[Templates] Template '{template_id}' not found, using default")
+    else:
+        print(f"[Templates] Using template: {template.get('name', template_id)}")
+
+    return template
 
 
 def get_video_dimensions(video_path):
@@ -187,11 +279,18 @@ def lambda_handler(event, context):
         clip = event['clip']
         clip_index = clip['clip_index']
 
+        # Get template_id from event (default to modern-minimal)
+        template_id = event.get('template_id', 'prof-modern-minimal')
+
+        # Load template configuration
+        template = get_template(template_id)
+
         # Get aspect ratio from environment variable (not from clip data)
         aspect_ratio = DEFAULT_ASPECT_RATIO
 
         print(f"[ProcessClip] Session: {session_id}")
         print(f"[ProcessClip] Clip {clip_index}: {clip['start']:.1f}s - {clip['end']:.1f}s")
+        print(f"[ProcessClip] Template: {template.get('name', template_id)} ({template_id})")
         print(f"[ProcessClip] Aspect ratio: {aspect_ratio} (from env)")
         print(f"[ProcessClip] Subtitles enabled: {ADD_SUBTITLES}")
         print(f"[ProcessClip] Smart framing: {ENABLE_SMART_FRAMING and SMART_FRAMING_AVAILABLE}")
@@ -258,6 +357,10 @@ def lambda_handler(event, context):
                 any(seg.get('words') for seg in clip['segments'])
             )
 
+
+        print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
+        print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
+        print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
             if ADD_SUBTITLES and clip.get('segments'):
                 if has_word_timestamps:
                     print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
@@ -268,7 +371,8 @@ def lambda_handler(event, context):
                         aspect_ratio,
                         video_width,
                         video_height,
-                        is_lambda
+                        is_lambda,
+                    template
                     )
                 else:
                     print(f"[ProcessClip] Processing with SIMPLE subtitles (segment-level)...")
@@ -279,7 +383,8 @@ def lambda_handler(event, context):
                         aspect_ratio,
                         video_width,
                         video_height,
-                        is_lambda
+                        is_lambda,
+                    template
                     )
             else:
                 if not ADD_SUBTITLES:
@@ -329,6 +434,8 @@ def lambda_handler(event, context):
             'clip_index': clip_index,
             's3_clip_key': s3_clip_key,
             'aspect_ratio': aspect_ratio,
+            'template_id': template_id,
+            'template_name': template.get('name', template_id),
             'timing': {
                 'download': download_time,
                 'process': process_time,
@@ -391,9 +498,9 @@ def calculate_crop_params(video_width, video_height, aspect_ratio):
     return crop_w, crop_h, crop_x, crop_y, target_width, target_height
 
 
-def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False):
+def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False, template=None):
     """
-    KARAOKE VERSION: Extract + aspect ratio conversion + word-by-word karaoke subtitles
+    KARAOKE VERSION: Extract + aspect ratio conversion + word-by-word karaoke subtitles with template styling
     """
     start_time = clip['start']
     end_time = clip['end']
@@ -407,11 +514,11 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
     print(f"[Karaoke] Aspect ratio: {aspect_ratio} ({target_width}x{target_height})")
     print(f"[Karaoke] Crop: {crop_w}x{crop_h} at ({crop_x}, {crop_y})")
 
-    # Create ASS subtitle file with karaoke effects (FIXED ENCODING)
+    # Create ASS subtitle file with karaoke effects and template styling
     ass_path = f"/tmp/clip_{clip['clip_index']}_karaoke.ass"
     print(f"[Karaoke] Creating ASS file at: {ass_path}")
 
-    create_karaoke_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda)
+    create_karaoke_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda, template)
 
     # Verify ASS file
     if not os.path.exists(ass_path):
@@ -459,9 +566,9 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
     return output_path
 
 
-def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False):
+def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False, template=None):
     """
-    SIMPLE VERSION: Segment-level subtitles with aspect ratio support
+    SIMPLE VERSION: Segment-level subtitles with aspect ratio support and template styling
     """
     start_time = clip['start']
     end_time = clip['end']
@@ -471,9 +578,9 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         video_width, video_height, aspect_ratio
     )
 
-    # Create simple ASS subtitle file
+    # Create simple ASS subtitle file with template styling
     ass_path = f"/tmp/clip_{clip['clip_index']}_simple.ass"
-    create_simple_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda)
+    create_simple_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda, template)
 
     if not os.path.exists(ass_path):
         raise Exception(f"ASS file not created at {ass_path}")
@@ -669,9 +776,27 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
 
 
 # Copy the ASS creation functions from your existing code
-def create_karaoke_ass_fixed(segments, clip_start, output_path, is_lambda=False):
-    """Create ASS subtitle file with word-by-word karaoke highlighting"""
-    font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+def create_karaoke_ass_fixed(segments, clip_start, output_path, is_lambda=False, template=None):
+    """Create ASS subtitle file with word-by-word karaoke highlighting using template styling"""
+
+    # Use template or fallback to defaults
+    if template is None:
+        template = {}
+
+    font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
+    font_size = template.get('font_size', 80)
+    primary_color = template.get('primary_color', '&H00FFFFFF')
+    secondary_color = template.get('secondary_color', '&H000000FF')
+    outline_color = template.get('outline_color', '&H00000000')
+    back_color = template.get('back_color', '&H00000000')
+    highlight_color = template.get('highlight_color', '&H0000FF00')
+    outline_width = template.get('outline_width', 4)
+    shadow_depth = template.get('shadow_depth', 0)
+    margin_v = template.get('margin_v', 640)
+    alignment = template.get('alignment', 2)
+    bold = template.get('bold', -1)
+
+    print(f"[Template] Font: {font_name}, Size: {font_size}, Primary: {primary_color}, Highlight: {highlight_color}")
 
     ass_content = f"""[Script Info]
 Title: Karaoke Subtitles
@@ -683,7 +808,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,640,1
+Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},10,10,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -713,9 +838,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     for idx, word in enumerate(line_words):
                         word_text = escape_ass_text(word['word'].strip())
                         if idx == active_idx:
-                            line_text += f"{{\\fs95\\b1\\c&H00FF00&\\3c&H000000&\\bord3\\shad2}}{word_text}{{\\r}} "
+                            # Highlighted word (use template highlight color)
+                            highlight_font_size = int(font_size * 1.2)
+                            line_text += f"{{\\fs{highlight_font_size}\\b1\\c{highlight_color}\\3c{outline_color}\\bord{outline_width}\\shad{shadow_depth}}}{word_text}{{\\r}} "
                         else:
-                            line_text += f"{{\\c&HFFFFFF&\\3c&H000000&\\bord3\\shad0}}{word_text}{{\\r}} "
+                            # Non-highlighted word (use template primary color)
+                            line_text += f"{{\\c{primary_color}\\3c{outline_color}\\bord{outline_width}\\shad0}}{word_text}{{\\r}} "
 
                     events.append(f"Dialogue: 0,{format_ass_time(word_start)},{format_ass_time(word_end)},Default,,0,0,0,,{line_text.strip()}")
 
@@ -723,9 +851,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         f.write(ass_content + '\n'.join(events))
 
 
-def create_simple_ass_fixed(segments, clip_start, output_path, is_lambda=False):
-    """Create simple ASS subtitle file"""
-    font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+def create_simple_ass_fixed(segments, clip_start, output_path, is_lambda=False, template=None):
+    """Create simple ASS subtitle file with template styling"""
+
+    # Use template or fallback to defaults
+    if template is None:
+        template = {}
+
+    font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
+    font_size = template.get('font_size', 70)
+    primary_color = template.get('primary_color', '&H00FFFFFF')
+    secondary_color = template.get('secondary_color', '&H000000FF')
+    outline_color = template.get('outline_color', '&H00000000')
+    back_color = template.get('back_color', '&H80000000')
+    outline_width = template.get('outline_width', 4)
+    shadow_depth = template.get('shadow_depth', 2)
+    margin_v = template.get('margin_v', 180)
+    alignment = template.get('alignment', 2)
+    bold = template.get('bold', -1)
+
+    print(f"[Template] Simple subtitles - Font: {font_name}, Size: {font_size}")
 
     ass_content = f"""[Script Info]
 Title: Simple Subtitles
@@ -737,7 +882,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,50,50,180,1
+Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},50,50,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
