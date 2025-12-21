@@ -9,7 +9,7 @@ import os
 import urllib.request
 import urllib.parse
 import urllib.error
-from datetime import datetime
+from datetime import datetime, timedelta
 
 def get_storage_client():
     """Get S3-compatible storage client (supports AWS S3, Cloudflare R2, Backblaze B2, etc.)"""
@@ -60,11 +60,16 @@ def update_firestore_video(user_id, session_id, data):
         # Add clips data
         if "clips" in data and data["clips"]:
             clips_array = []
+            # Calculate expiry: 3 days from now
+            expiry_time = datetime.utcnow() + timedelta(days=3)
+            expiry_iso = expiry_time.isoformat() + "Z"
+
             for clip in data["clips"]:
                 clip_fields = {
                     "clipIndex": {"integerValue": str(clip["clip_index"])},
                     "downloadUrl": {"stringValue": clip["download_url"]},
-                    "s3Key": {"stringValue": clip["s3_key"]}
+                    "s3Key": {"stringValue": clip["s3_key"]},
+                    "expiresAt": {"timestampValue": expiry_iso}  # 3-day TTL
                 }
 
                 # Add optional fields if present
@@ -78,6 +83,10 @@ def update_firestore_video(user_id, session_id, data):
                     clip_fields["startTime"] = {"doubleValue": clip["startTime"]}
                 if "endTime" in clip and clip["endTime"] is not None:
                     clip_fields["endTime"] = {"doubleValue": clip["endTime"]}
+                if "template_id" in clip and clip["template_id"]:
+                    clip_fields["template_id"] = {"stringValue": clip["template_id"]}
+                if "template_name" in clip and clip["template_name"]:
+                    clip_fields["template_name"] = {"stringValue": clip["template_name"]}
 
                 # Add score breakdown if present
                 if "score_breakdown" in clip and clip["score_breakdown"]:
@@ -236,6 +245,13 @@ def lambda_handler(event, context):
         print(f"[Finalize] User ID: {user_id}")
         print(f"[Finalize] Processing {len(processed_clips)} clips")
 
+        # Calculate expiry timestamp (3 days from now)
+        expiry_time = datetime.utcnow() + timedelta(days=3)
+        expiry_unix = int(expiry_time.timestamp())
+        expiry_iso = expiry_time.isoformat() + "Z"
+
+        print(f"[Finalize] Clips will expire at: {expiry_iso}")
+
         # Generate download URLs
         clip_urls = []
         r2_public_domain = os.environ.get('R2_PUBLIC_DOMAIN', '')  # e.g., "pub-xxxxx.r2.dev" or "cdn.yourdomain.com"
@@ -284,6 +300,10 @@ def lambda_handler(event, context):
                 clip_data['virality_score'] = clip['virality_score']
             if 'score_breakdown' in clip:
                 clip_data['score_breakdown'] = clip['score_breakdown']
+            if 'template_id' in clip:
+                clip_data['template_id'] = clip['template_id']
+            if 'template_name' in clip:
+                clip_data['template_name'] = clip['template_name']
 
             clip_urls.append(clip_data)
 
