@@ -184,7 +184,8 @@
         "s3_video_key.$": "$.s3_video_key",
         "clip.$": "$$.Map.Item.Value",
         "user_id.$": "$.user_id",
-        "user_email.$": "$.user_email"
+        "user_email.$": "$.user_email",
+        "template_id.$": "$.template_id"
       },
       "Iterator": {
         "StartAt": "ProcessSingleClip",

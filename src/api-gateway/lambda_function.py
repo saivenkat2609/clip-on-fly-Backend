@@ -32,11 +32,15 @@ BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
 
 def get_cors_headers():
     """Return CORS headers for all responses"""
+    # Get allowed origins from environment (comma-separated list)
+    allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*')
+
     return {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowed_origins.split(',')[0] if allowed_origins != '*' else '*',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Credentials': 'true'
     }
 
 def lambda_handler(event, context):
@@ -51,6 +55,13 @@ def lambda_handler(event, context):
 
     http_method = event.get('httpMethod', event.get('requestContext', {}).get('http', {}).get('method', 'GET'))
     path = event.get('path', event.get('rawPath', '/'))
+
+    # Strip stage prefix from path (e.g., /prod/process -> /process)
+    # This handles both $default stage (no prefix) and named stages (e.g., /prod)
+    if path.startswith('/prod/'):
+        path = path[5:]  # Remove '/prod' prefix
+    elif path.startswith('/$default/'):
+        path = path[9:]  # Remove '/$default' prefix
 
     print(f"[API] Method: {http_method}, Path: {path}")
 
@@ -82,12 +93,26 @@ def lambda_handler(event, context):
 def handle_process(event):
     """Handle POST /process - Start video processing"""
     try:
-        # Parse request body
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        user_id = authorizer_context.get('userId')
+        user_email = authorizer_context.get('email', '')
+
+        if not user_id:
+            print("[API] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
         youtube_url = body.get('youtube_url')
-        user_id = body.get('user_id')
-        user_email = body.get('user_email', '')
+        project_name = body.get('project_name', 'Untitled Project')
         start_from = body.get('startFrom', 'download')
+
         if not youtube_url:
             return {
                 'statusCode': 400,
@@ -95,19 +120,14 @@ def handle_process(event):
                 'body': json.dumps({'error': 'youtube_url is required'})
             }
 
-        if not user_id:
-            return {
-                'statusCode': 400,
-                'headers': get_cors_headers(),
-                'body': json.dumps({'error': 'user_id is required'})
-            }
-
         # Generate session ID
         session_id = str(uuid.uuid4())
 
         print(f"[API] Starting processing for session: {session_id}")
-        print(f"[API] User ID: {user_id}")
+        print(f"[API] User ID: {user_id} (verified via JWT)")
+        print(f"[API] User Email: {user_email}")
         print(f"[API] YouTube URL: {youtube_url}")
+        print(f"[API] Project Name: {project_name}")
 
         # Start Step Functions execution
         execution = stepfunctions.start_execution(
@@ -234,10 +254,33 @@ def handle_result(event, path):
 def handle_user_videos(event, path):
     """Handle GET /user/{user_id}/videos - Get all videos for a user"""
     try:
-        # Extract user ID from path
-        user_id = path.split('/user/')[-1].split('/videos')[0]
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        authenticated_user_id = authorizer_context.get('userId')
 
-        print(f"[API] Getting videos for user: {user_id}")
+        if not authenticated_user_id:
+            print("[API] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Extract user ID from path
+        requested_user_id = path.split('/user/')[-1].split('/videos')[0]
+
+        # Verify the authenticated user is requesting their own videos
+        if authenticated_user_id != requested_user_id:
+            print(f"[API] ERROR: User {authenticated_user_id} attempted to access videos of user {requested_user_id}")
+            return {
+                'statusCode': 403,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Forbidden - You can only access your own videos'})
+            }
+
+        user_id = authenticated_user_id
+        print(f"[API] Getting videos for user: {user_id} (verified via JWT)")
 
         # List all objects in user's directory
         user_prefix = f"users/{user_id}/"

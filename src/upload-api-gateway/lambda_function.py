@@ -41,11 +41,15 @@ UPLOAD_EXPIRY = int(os.environ.get('UPLOAD_EXPIRY', '3600'))  # 1 hour
 
 def get_cors_headers():
     """Return CORS headers for all responses"""
+    # Get allowed origins from environment (comma-separated list)
+    allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*')
+
     return {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowed_origins.split(',')[0] if allowed_origins != '*' else '*',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Credentials': 'true'
     }
 
 def lambda_handler(event, context):
@@ -96,22 +100,27 @@ def lambda_handler(event, context):
 def handle_generate_upload_url(event):
     """Handle POST /upload/generate-url - Generate pre-signed URL for upload"""
     try:
-        # Parse request body
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        user_id = authorizer_context.get('userId')
+        user_email = authorizer_context.get('email', '')
+
+        if not user_id:
+            print("[API-Upload] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
-        user_id = body.get('user_id')
-        user_email = body.get('user_email', '')
         file_name = body.get('fileName')
         file_size = body.get('fileSize')
         content_type = body.get('contentType', 'video/mp4')
         video_title = body.get('videoTitle', 'Uploaded Video')
         video_description = body.get('videoDescription', '')
-
-        if not user_id:
-            return {
-                'statusCode': 400,
-                'headers': get_cors_headers(),
-                'body': json.dumps({'error': 'user_id is required'})
-            }
 
         if not file_name or not file_size:
             return {
@@ -134,7 +143,8 @@ def handle_generate_upload_url(event):
         session_id = str(uuid.uuid4())
 
         print(f"[API-Upload] Generating upload URL for session: {session_id}")
-        print(f"[API-Upload] User ID: {user_id}")
+        print(f"[API-Upload] User ID: {user_id} (verified via JWT)")
+        print(f"[API-Upload] User Email: {user_email}")
         print(f"[API-Upload] File: {file_name} ({file_size / 1024 / 1024:.2f} MB)")
 
         # Generate pre-signed URL
@@ -181,27 +191,40 @@ def handle_generate_upload_url(event):
 def handle_start_processing(event):
     """Handle POST /upload/start - Start video processing after upload"""
     try:
-        # Parse request body
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        user_id = authorizer_context.get('userId')
+        user_email = authorizer_context.get('email', '')
+
+        if not user_id:
+            print("[API-Upload] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
         session_id = body.get('session_id')
-        user_id = body.get('user_id')
-        user_email = body.get('user_email', '')
         video_title = body.get('videoTitle', 'Uploaded Video')
         video_description = body.get('videoDescription', '')
         s3_key = body.get('s3_key')
 
-        if not session_id or not user_id:
+        if not session_id:
             return {
                 'statusCode': 400,
                 'headers': get_cors_headers(),
-                'body': json.dumps({'error': 'session_id and user_id are required'})
+                'body': json.dumps({'error': 'session_id is required'})
             }
 
         if not s3_key:
             s3_key = f"{session_id}/uploaded_video.mp4"
 
         print(f"[API-Upload] Starting processing for session: {session_id}")
-        print(f"[API-Upload] User ID: {user_id}")
+        print(f"[API-Upload] User ID: {user_id} (verified via JWT)")
+        print(f"[API-Upload] User Email: {user_email}")
         print(f"[API-Upload] S3 Key: {s3_key}")
 
         # Verify upload exists (optional - Worker already confirmed upload)
@@ -349,10 +372,33 @@ def handle_result(event, path):
 def handle_user_videos(event, path):
     """Handle GET /upload/user/{user_id}/videos - Get all videos for a user"""
     try:
-        # Extract user ID from path
-        user_id = path.split('/user/')[-1].split('/videos')[0]
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        authenticated_user_id = authorizer_context.get('userId')
 
-        print(f"[API-Upload] Getting videos for user: {user_id}")
+        if not authenticated_user_id:
+            print("[API-Upload] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Extract user ID from path
+        requested_user_id = path.split('/user/')[-1].split('/videos')[0]
+
+        # Verify the authenticated user is requesting their own videos
+        if authenticated_user_id != requested_user_id:
+            print(f"[API-Upload] ERROR: User {authenticated_user_id} attempted to access videos of user {requested_user_id}")
+            return {
+                'statusCode': 403,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Forbidden - You can only access your own videos'})
+            }
+
+        user_id = authenticated_user_id
+        print(f"[API-Upload] Getting videos for user: {user_id} (verified via JWT)")
 
         # List all objects in user's directory
         user_prefix = f"users/{user_id}/"
