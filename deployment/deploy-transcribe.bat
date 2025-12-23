@@ -46,20 +46,28 @@ echo Selected Whisper Model: %WHISPER_MODEL%
 echo.
 
 echo [1/6] Authenticating Docker with ECR...
-aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
+for /f "tokens=*" %%p in ('aws ecr get-login-password --region %AWS_REGION% --no-verify-ssl 2^>nul') do set ECR_PASSWORD=%%p
+if "%ECR_PASSWORD%"=="" (
+    echo ERROR: Failed to get ECR login password
+    exit /b 1
+)
+echo %ECR_PASSWORD% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
 if %errorlevel% neq 0 (
     echo ERROR: Failed to authenticate with ECR
     exit /b 1
 )
+echo Authentication successful.
 
 echo [2/6] Building Docker image...
 echo This may take 10-15 minutes (includes Whisper model download)...
+cd ..
 docker build ^
     --platform linux/amd64 ^
     --build-arg WHISPER_MODEL=%WHISPER_MODEL% ^
     -t %ECR_REPO_NAME%:latest ^
-    -f dockerfiles/Dockerfile.transcribe ^
+    -f deployment/dockerfiles/Dockerfile.transcribe ^
     .
+cd deployment
 
 if %errorlevel% neq 0 (
     echo ERROR: Docker build failed
@@ -82,7 +90,8 @@ echo [5/6] Updating Lambda function...
 aws lambda update-function-code ^
     --function-name %FUNCTION_NAME% ^
     --image-uri %ECR_URI%:latest ^
-    --region %AWS_REGION%
+    --region %AWS_REGION% ^
+    --no-verify-ssl
 
 if %errorlevel% neq 0 (
     echo ERROR: Failed to update Lambda function
@@ -92,7 +101,8 @@ if %errorlevel% neq 0 (
 echo [6/6] Waiting for Lambda update to complete...
 aws lambda wait function-updated ^
     --function-name %FUNCTION_NAME% ^
-    --region %AWS_REGION%
+    --region %AWS_REGION% ^
+    --no-verify-ssl
 
 echo.
 echo ========================================

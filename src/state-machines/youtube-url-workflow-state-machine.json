@@ -69,7 +69,8 @@
         "s3_video_key.$": "$.downloadResult.s3_video_key",
         "video_info.$": "$.downloadResult.video_info",
         "user_id.$": "$.user_id",
-        "user_email.$": "$.user_email"
+        "user_email.$": "$.user_email",
+        "template_id.$": "$.template_id"
       },
       "Next": "TranscribeVideo"
     },
@@ -115,7 +116,8 @@
         "s3_transcript_key.$": "$.transcribeResult.s3_transcript_key",
         "video_info.$": "$.transcribeResult.video_info",
         "user_id.$": "$.user_id",
-        "user_email.$": "$.user_email"
+        "user_email.$": "$.user_email",
+        "template_id.$": "$.template_id"
       },
       "Next": "DetectClips"
     },
@@ -159,7 +161,8 @@
         "clips.$": "$.detectResult.clips",
         "video_info.$": "$.detectResult.video_info",
         "user_id.$": "$.user_id",
-        "user_email.$": "$.user_email"
+        "user_email.$": "$.user_email",
+        "template_id.$": "$.template_id"
       },
       "Next": "CheckClipsFound"
     },
@@ -184,7 +187,8 @@
         "s3_video_key.$": "$.s3_video_key",
         "clip.$": "$$.Map.Item.Value",
         "user_id.$": "$.user_id",
-        "user_email.$": "$.user_email"
+        "user_email.$": "$.user_email",
+        "template_id.$": "$.template_id"
       },
       "Iterator": {
         "StartAt": "ProcessSingleClip",
@@ -193,6 +197,12 @@
             "Type": "Task",
             "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-process-clip",
             "Comment": "Extract clip, convert to 9:16, add subtitles",
+            "Parameters": {
+              "session_id.$": "$.session_id",
+              "s3_video_key.$": "$.s3_video_key",
+              "clip.$": "$.clip",
+              "template_id.$": "$.template_id"
+            },
             "End": true,
             "Retry": [
               {

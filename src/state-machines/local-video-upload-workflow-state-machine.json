@@ -131,6 +131,19 @@
           "ResultPath": "$.error"
         }
       ],
+      "Next": "PrepareForProcessing"
+    },
+    "PrepareForProcessing": {
+      "Type": "Pass",
+      "Comment": "Prepare data for processing with template_id from input",
+      "Parameters": {
+        "session_id.$": "$.session_id",
+        "s3_video_key.$": "$.detectResult.s3_video_key",
+        "detectResult.$": "$.detectResult",
+        "user_id.$": "$.user_id",
+        "user_email.$": "$.user_email",
+        "template_id.$": "$.template_id"
+      },
       "Next": "ProcessClipsInParallel"
     },
     "ProcessClipsInParallel": {
@@ -142,7 +155,8 @@
         "session_id.$": "$.session_id",
         "s3_video_key.$": "$.detectResult.s3_video_key",
         "clip.$": "$$.Map.Item.Value",
-        "user_id.$": "$.user_id"
+        "user_id.$": "$.user_id",
+        "template_id.$": "$.template_id"
       },
       "Iterator": {
         "StartAt": "ProcessSingleClip",
@@ -156,7 +170,8 @@
               "Payload": {
                 "session_id.$": "$.session_id",
                 "s3_video_key.$": "$.s3_video_key",
-                "clip.$": "$.clip"
+                "clip.$": "$.clip",
+                "template_id.$": "$.template_id"
               }
             },
             "ResultSelector": {

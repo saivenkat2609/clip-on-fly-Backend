@@ -1,0 +1,63 @@
+# Dockerfile for opus-process-clip Lambda Function (ECR Deployment)
+# This creates a container image for the video processing Lambda function
+# Uses AWS Lambda Python 3.11 base image for compatibility
+
+FROM public.ecr.aws/lambda/python:3.11
+
+# Set working directory
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+# Install system dependencies for OpenCV, FFmpeg, and build tools
+# - libgomp: Required by OpenCV for parallel processing
+# - gcc, gcc-c++: Required for compiling Python packages with native extensions
+# - mesa-libGL: Provides libGL.so.1 for OpenCV (fixes "cannot open shared object file" error)
+# - libXext, libSM, libXrender: X11 libraries required by OpenCV/MediaPipe
+# - tar: Required for extracting FFmpeg static build
+# NOTE: SSL verification disabled due to certificate issues in build environment
+RUN echo "sslverify=0" >> /etc/yum.conf && \
+    yum update -y && \
+    yum install -y \
+        libgomp \
+        gcc \
+        gcc-c++ \
+        mesa-libGL \
+        libXext \
+        libSM \
+        libXrender \
+        tar \
+        xz && \
+    yum clean all && \
+    rm -rf /var/cache/yum
+
+# Install FFmpeg static build (optimized for Lambda)
+# NOTE: Using --insecure due to SSL certificate issues in build environment
+RUN curl -L --insecure https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz -o /tmp/ffmpeg.tar.xz && \
+    tar -xf /tmp/ffmpeg.tar.xz -C /tmp && \
+    mv /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ffmpeg && \
+    mv /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe && \
+    chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe && \
+    rm -rf /tmp/ffmpeg* && \
+    ffmpeg -version
+
+# Copy requirements file
+COPY src/process-clip/requirements_lambda.txt requirements_lambda.txt
+
+# Install Python dependencies
+# NOTE: SSL verification disabled due to certificate issues in build environment
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+        --trusted-host pypi.org \
+        --trusted-host files.pythonhosted.org \
+        -r requirements_lambda.txt
+
+# Copy Lambda function code
+COPY src/process-clip/lambda_function.py lambda_function.py
+
+# Copy smart_framing module
+COPY src/process-clip/smart_framing/ smart_framing/
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+
+# Lambda handler
+CMD [ "lambda_function.lambda_handler" ]

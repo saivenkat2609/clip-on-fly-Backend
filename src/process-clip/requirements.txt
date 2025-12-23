@@ -1,7 +1,14 @@
-# NO DEPENDENCIES NEEDED!
-# This lambda only uses:
-# - boto3 (built-in to Lambda)
+# Original process-clip dependencies
+# - boto3 (built-in to Lambda runtime - no need to package)
 # - subprocess, json, os (Python standard library)
+# - Requires FFmpeg Lambda layer at /opt/bin/ffmpeg
 
-# Note: Requires FFmpeg Lambda layer at /opt/bin/ffmpeg
-# Empty requirements - nothing to install
+# Smart Framing dependencies (Phase 1 - Face Detection)
+# Only install these if using ENABLE_SMART_FRAMING=true
+mediapipe==0.10.9
+opencv-python==4.8.1.78
+numpy==1.24.3
+scipy==1.11.4
+
+# Note: For Lambda deployment, use opencv-python-headless instead of opencv-python
+# For local testing, opencv-python is recommended (includes GUI support for debugging)

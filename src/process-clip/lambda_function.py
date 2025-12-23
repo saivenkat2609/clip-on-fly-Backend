@@ -1,13 +1,31 @@
 """
-Lambda Function 4: Process Individual Clip (MULTI-ASPECT RATIO)
+Lambda Function 4: Process Individual Clip (MULTI-ASPECT RATIO + SMART FRAMING)
 Extracts clip, converts to multiple aspect ratios (9:16, 16:9, 1:1), and adds KARAOKE subtitles
 SUPPORTS: Vertical (9:16), Horizontal (16:9), Square (1:1)
+NEW: Smart framing with face detection and speaker tracking
 """
 import json
 import boto3
 import os
 import subprocess
 import time
+from pathlib import Path
+
+# Smart Framing imports (optional - graceful fallback if not available)
+try:
+    from smart_framing import (
+        create_detector,
+        correlate_faces_with_speech,
+        calculate_smart_crop,
+        process_clip_with_smart_framing,
+        create_subtitles,
+        ASPECT_RATIOS as SMART_ASPECT_RATIOS
+    )
+    SMART_FRAMING_AVAILABLE = True
+    print("[SmartFraming] Smart framing module loaded successfully")
+except ImportError as e:
+    SMART_FRAMING_AVAILABLE = False
+    print(f"[SmartFraming] Smart framing not available: {e}")
 
 def get_storage_client():
     """Get S3-compatible storage client"""
@@ -27,11 +45,14 @@ def get_storage_client():
 
 s3 = get_storage_client()
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
-FFMPEG_PATH = os.environ.get('FFMPEG_PATH', '/opt/bin/ffmpeg')
-FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/opt/bin/ffprobe')
+FFMPEG_PATH = os.environ.get('FFMPEG_PATH', '/usr/local/bin/ffmpeg')
+FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/usr/local/bin/ffprobe')
 
 # ALWAYS enable karaoke subtitles (no env variable needed - always True)
 ADD_SUBTITLES = True  # Karaoke subtitles always enabled
+
+# Smart Framing toggle (set ENABLE_SMART_FRAMING=true to enable)
+ENABLE_SMART_FRAMING = os.environ.get('ENABLE_SMART_FRAMING', 'false').lower() == 'true'
 
 # Aspect ratio from environment variable (default: 9:16 for vertical/shorts)
 DEFAULT_ASPECT_RATIO = os.environ.get('ASPECT_RATIO', '9:16')
@@ -58,6 +79,81 @@ ASPECT_RATIOS = {
         'name': 'square'
     }
 }
+
+# Template cache (loaded once per Lambda warm start)
+_TEMPLATE_CACHE = None
+
+def load_templates():
+    """Load template configurations from JSON file or S3"""
+    global _TEMPLATE_CACHE
+
+    if _TEMPLATE_CACHE is not None:
+        return _TEMPLATE_CACHE
+
+    # Try to load from local file first (bundled with Lambda)
+    template_paths = [
+        '/var/task/templates.json',
+        '/var/task/src/shared/templates.json',
+        os.path.join(os.path.dirname(__file__), '..', 'shared', 'templates.json'),
+        './templates.json'
+    ]
+
+    for path in template_paths:
+        if os.path.exists(path):
+            print(f"[Templates] Loading from: {path}")
+            with open(path, 'r') as f:
+                _TEMPLATE_CACHE = json.load(f)
+                print(f"[Templates] Loaded {len(_TEMPLATE_CACHE.get('templates', {}))} templates")
+                return _TEMPLATE_CACHE
+
+    # Fallback: Try loading from S3
+    try:
+        print("[Templates] Loading from S3...")
+        response = s3.get_object(Bucket=BUCKET_NAME, Key='config/templates.json')
+        _TEMPLATE_CACHE = json.loads(response['Body'].read())
+        print(f"[Templates] Loaded {len(_TEMPLATE_CACHE.get('templates', {}))} templates from S3")
+        return _TEMPLATE_CACHE
+    except Exception as e:
+        print(f"[Templates] Failed to load from S3: {e}")
+
+    # Final fallback: Return default template
+    print("[Templates] Using default template (no config found)")
+    _TEMPLATE_CACHE = {
+        "templates": {
+            "prof-modern-minimal": {
+                "id": "prof-modern-minimal",
+                "name": "Modern Minimal",
+                "font": "DejaVu Sans",
+                "font_size": 70,
+                "primary_color": "&H00FFFFFF",
+                "highlight_color": "&H0000CCFF",
+                "outline_color": "&H00000000",
+                "back_color": "&H80000000",
+                "outline_width": 3,
+                "shadow_depth": 2,
+                "position": "bottom",
+                "margin_v": 180,
+                "alignment": 2,
+                "bold": -1
+            }
+        }
+    }
+    return _TEMPLATE_CACHE
+
+def get_template(template_id):
+    """Get specific template by ID"""
+    templates_config = load_templates()
+    templates = templates_config.get('templates', {})
+
+    # Return requested template or default
+    template = templates.get(template_id, templates.get('prof-modern-minimal'))
+
+    if template_id not in templates:
+        print(f"[Templates] Template '{template_id}' not found, using default")
+    else:
+        print(f"[Templates] Using template: {template.get('name', template_id)}")
+
+    return template
 
 
 def get_video_dimensions(video_path):
@@ -167,13 +263,21 @@ def lambda_handler(event, context):
         clip = event['clip']
         clip_index = clip['clip_index']
 
+        # Get template_id from event (default to modern-minimal)
+        template_id = event.get('template_id', 'prof-modern-minimal')
+
+        # Load template configuration
+        template = get_template(template_id)
+
         # Get aspect ratio from environment variable (not from clip data)
         aspect_ratio = DEFAULT_ASPECT_RATIO
 
         print(f"[ProcessClip] Session: {session_id}")
         print(f"[ProcessClip] Clip {clip_index}: {clip['start']:.1f}s - {clip['end']:.1f}s")
+        print(f"[ProcessClip] Template: {template.get('name', template_id)} ({template_id})")
         print(f"[ProcessClip] Aspect ratio: {aspect_ratio} (from env)")
         print(f"[ProcessClip] Subtitles enabled: {ADD_SUBTITLES}")
+        print(f"[ProcessClip] Smart framing: {ENABLE_SMART_FRAMING and SMART_FRAMING_AVAILABLE}")
         print(f"[ProcessClip] Environment: {'Lambda' if is_lambda else 'Local'}")
         print(f"[TIMING] Lambda start")
 
@@ -200,65 +304,102 @@ def lambda_handler(event, context):
         # Final output path
         final_clip_path = f"/tmp/clip_{clip_index}.mp4"
 
-        # Process with karaoke subtitles and specified aspect ratio
+        # Process with smart framing or traditional cropping
         start_process = time.time()
 
-        # Check if we have word-level timestamps for karaoke
-        has_word_timestamps = (
-            ADD_SUBTITLES and
-            clip.get('segments') and
-            any(seg.get('words') for seg in clip['segments'])
+        # Check if caller explicitly wants to skip smart framing (e.g., reprocessing)
+        skip_smart_framing = event.get('skip_smart_framing', False)
+
+        # Check if smart framing is enabled and available
+        use_smart_framing = (
+            not skip_smart_framing and  # Don't use if explicitly skipped
+            ENABLE_SMART_FRAMING and
+            SMART_FRAMING_AVAILABLE and
+            clip.get('segments')  # Need transcript for speaker tracking
         )
 
-        print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
-        print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
-        print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
+        if skip_smart_framing:
+            print(f"[ProcessClip] Smart framing skipped (reprocessing mode for faster template changes)")
 
-        if ADD_SUBTITLES and clip.get('segments'):
-            if has_word_timestamps:
-                print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
-                process_clip_with_karaoke_subtitles(
-                    local_video_path,
-                    clip,
-                    final_clip_path,
-                    aspect_ratio,
-                    video_width,
-                    video_height,
-                    is_lambda
-                )
-            else:
-                print(f"[ProcessClip] Processing with SIMPLE subtitles (segment-level)...")
-                process_clip_with_simple_subtitles(
-                    local_video_path,
-                    clip,
-                    final_clip_path,
-                    aspect_ratio,
-                    video_width,
-                    video_height,
-                    is_lambda
-                )
-        else:
-            if not ADD_SUBTITLES:
-                print(f"[ProcessClip] Skipping subtitles: ADD_SUBTITLES is False")
-            elif not clip.get('segments'):
-                print(f"[ProcessClip] Skipping subtitles: No segments provided")
-            print(f"[ProcessClip] Processing without subtitles (fast)...")
-            extract_clip_no_subs(
+        if use_smart_framing:
+            print(f"[ProcessClip] Processing with SMART FRAMING + subtitles...")
+            process_clip_with_smart_framing_lambda(
                 local_video_path,
-                clip['start'],
-                clip['end'],
+                clip,
                 final_clip_path,
                 aspect_ratio,
                 video_width,
-                video_height
+                video_height,
+                is_lambda,
+                template
             )
+        else:
+            # Traditional center-crop processing
+            if not ENABLE_SMART_FRAMING:
+                print(f"[ProcessClip] Smart framing disabled (set ENABLE_SMART_FRAMING=true to enable)")
+            elif not SMART_FRAMING_AVAILABLE:
+                print(f"[ProcessClip] Smart framing module not available, using center crop")
+            elif not clip.get('segments'):
+                print(f"[ProcessClip] No transcript segments, using center crop")
+
+            # Check if we have word-level timestamps for karaoke
+            has_word_timestamps = (
+                ADD_SUBTITLES and
+                clip.get('segments') and
+                any(seg.get('words') for seg in clip['segments'])
+            )
+
+
+            print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
+            print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
+            print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
+            if ADD_SUBTITLES and clip.get('segments'):
+                if has_word_timestamps:
+                    print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
+                    process_clip_with_karaoke_subtitles(
+                        local_video_path,
+                        clip,
+                        final_clip_path,
+                        aspect_ratio,
+                        video_width,
+                        video_height,
+                        is_lambda,
+                    template
+                    )
+                else:
+                    print(f"[ProcessClip] Processing with SIMPLE subtitles (segment-level)...")
+                    process_clip_with_simple_subtitles(
+                        local_video_path,
+                        clip,
+                        final_clip_path,
+                        aspect_ratio,
+                        video_width,
+                        video_height,
+                        is_lambda,
+                    template
+                    )
+            else:
+                if not ADD_SUBTITLES:
+                    print(f"[ProcessClip] Skipping subtitles: ADD_SUBTITLES is False")
+                elif not clip.get('segments'):
+                    print(f"[ProcessClip] Skipping subtitles: No segments provided")
+                print(f"[ProcessClip] Processing without subtitles (fast)...")
+                extract_clip_no_subs(
+                    local_video_path,
+                    clip['start'],
+                    clip['end'],
+                    final_clip_path,
+                    aspect_ratio,
+                    video_width,
+                    video_height
+                )
 
         process_time = time.time() - start_process
 
         output_size_mb = os.path.getsize(final_clip_path) / (1024*1024)
         print(f"[TIMING] Processing: {process_time:.2f}s (output: {output_size_mb:.2f} MB)")
 
-        # Upload to S3
+        # Upload to S3 (always use same key - overwrite for reprocessing)
         s3_clip_key = f"{session_id}/clips/clip_{clip_index}_{aspect_ratio.replace(':', 'x')}.mp4"
         print(f"[ProcessClip] Uploading to S3: {s3_clip_key}")
 
@@ -285,6 +426,8 @@ def lambda_handler(event, context):
             'clip_index': clip_index,
             's3_clip_key': s3_clip_key,
             'aspect_ratio': aspect_ratio,
+            'template_id': template_id,
+            'template_name': template.get('name', template_id),
             'timing': {
                 'download': download_time,
                 'process': process_time,
@@ -347,9 +490,9 @@ def calculate_crop_params(video_width, video_height, aspect_ratio):
     return crop_w, crop_h, crop_x, crop_y, target_width, target_height
 
 
-def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False):
+def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False, template=None):
     """
-    KARAOKE VERSION: Extract + aspect ratio conversion + word-by-word karaoke subtitles
+    KARAOKE VERSION: Extract + aspect ratio conversion + word-by-word karaoke subtitles with template styling
     """
     start_time = clip['start']
     end_time = clip['end']
@@ -363,17 +506,17 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
     print(f"[Karaoke] Aspect ratio: {aspect_ratio} ({target_width}x{target_height})")
     print(f"[Karaoke] Crop: {crop_w}x{crop_h} at ({crop_x}, {crop_y})")
 
-    # Create ASS subtitle file with karaoke effects (FIXED ENCODING)
+    # Create ASS subtitle file with karaoke effects and template styling
     ass_path = f"/tmp/clip_{clip['clip_index']}_karaoke.ass"
     print(f"[Karaoke] Creating ASS file at: {ass_path}")
 
-    create_karaoke_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda)
+    create_karaoke_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda, template)
 
     # Verify ASS file
     if not os.path.exists(ass_path):
         raise Exception(f"ASS file not created at {ass_path}")
 
-    # FFmpeg command with aspect ratio support and audio/video sync fixes
+    # FFmpeg command with aspect ratio support and FIXED subtitle sync
     cmd = [
         FFMPEG_PATH,
         '-ss', str(start_time),
@@ -383,22 +526,25 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '28',
+        '-pix_fmt', 'yuv420p',  # Maximum compatibility
         '-c:a', 'aac',
         '-b:a', '96k',
         '-ar', '44100',
         '-ac', '2',
         '-max_muxing_queue_size', '1024',
-        '-async', '1',
-        '-vsync', 'cfr',
         '-movflags', '+faststart',
-        '-avoid_negative_ts', 'make_zero',
         '-threads', '0',
         '-y',
         output_path
     ]
 
     print(f"[Karaoke] Running FFmpeg with karaoke subtitles...")
+    print(f"[Karaoke] Command: {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
+
+    print(f"[Karaoke] FFmpeg return code: {result.returncode}")
+    if result.stderr:
+        print(f"[Karaoke] FFmpeg stderr (last 500 chars): {result.stderr[-500:]}")
 
     if result.returncode != 0:
         print(f"[Karaoke] FFmpeg error: {result.stderr}")
@@ -412,9 +558,9 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
     return output_path
 
 
-def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False):
+def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False, template=None):
     """
-    SIMPLE VERSION: Segment-level subtitles with aspect ratio support
+    SIMPLE VERSION: Segment-level subtitles with aspect ratio support and template styling
     """
     start_time = clip['start']
     end_time = clip['end']
@@ -424,9 +570,9 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         video_width, video_height, aspect_ratio
     )
 
-    # Create simple ASS subtitle file
+    # Create simple ASS subtitle file with template styling
     ass_path = f"/tmp/clip_{clip['clip_index']}_simple.ass"
-    create_simple_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda)
+    create_simple_ass_fixed(clip['segments'], clip['start'], ass_path, is_lambda, template)
 
     if not os.path.exists(ass_path):
         raise Exception(f"ASS file not created at {ass_path}")
@@ -435,6 +581,7 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         FFMPEG_PATH,
         '-ss', str(start_time),
         '-i', video_path,
+        '-ss', '0',  # Accurate seek for subtitle sync
         '-t', str(duration),
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height},subtitles={ass_path}',
         '-c:v', 'libx264',
@@ -445,10 +592,10 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         '-ar', '44100',
         '-ac', '2',
         '-max_muxing_queue_size', '1024',
-        '-async', '1',
-        '-vsync', 'cfr',
+        '-vsync', '2',  # VFR - prevents subtitle drift
+        '-copyts',  # Preserve timestamps for subtitle sync
+        '-start_at_zero',  # Normalize output timestamps
         '-movflags', '+faststart',
-        '-avoid_negative_ts', 'make_zero',
         '-threads', '0',
         '-y',
         output_path
@@ -467,6 +614,116 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
     return output_path
 
 
+def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False, template=None):
+    """
+    SMART FRAMING VERSION: Face detection + speaker tracking + dynamic crop + subtitles
+    Uses the smart_framing module for intelligent speaker-focused cropping
+    """
+    start_time = clip['start']
+    end_time = clip['end']
+    duration = end_time - start_time
+
+    print(f"[SmartFraming] Processing with face detection and speaker tracking...")
+    print(f"[SmartFraming] Aspect ratio: {aspect_ratio}")
+    print(f"[SmartFraming] Duration: {duration:.2f}s")
+
+    try:
+        # Step 1: Face detection
+        print(f"[SmartFraming] Step 1/4: Face detection...")
+        detector = create_detector('mediapipe_improved', model_dir='/tmp/mediapipe_models')
+
+        face_timeline = detector.detect_faces_in_video(
+            video_path,
+            start_sec=start_time,
+            end_sec=end_time,
+            sample_rate=5  # Sample every 5 frames for Lambda
+        )
+
+        print(f"[SmartFraming] Detected faces in {len(face_timeline)} frames")
+
+        # Step 2: Speaker correlation
+        print(f"[SmartFraming] Step 2/4: Correlating faces with speech...")
+        speaker_activity = correlate_faces_with_speech(
+            face_timeline,
+            clip['segments'],
+            clip_start=start_time
+        )
+
+        # Step 3: Calculate smart crop
+        print(f"[SmartFraming] Step 3/4: Calculating smart crop timeline...")
+        crop_timeline, crop_dims = calculate_smart_crop(
+            speaker_activity,
+            video_width,
+            video_height,
+            target_aspect=aspect_ratio,
+            padding_ratio=0.15,
+            smoothing_sigma=0.5,
+            face_timeline=face_timeline,
+            enable_motion_keyframes=True,
+            motion_threshold=100,
+            max_keyframe_interval=3.0,
+            use_sticky_crop=True,  # Enable sticky crop for stable framing
+            dead_zone_radius=150
+        )
+
+        print(f"[SmartFraming] Generated {len(crop_timeline)} keyframes")
+
+        # Step 4: Create subtitles
+        print(f"[SmartFraming] Step 4/4: Creating subtitles...")
+        ass_path = f"/tmp/clip_{clip['clip_index']}_smart.ass"
+
+        has_word_timestamps = any(seg.get('words') for seg in clip['segments'])
+        subtitle_mode = 'karaoke' if has_word_timestamps else 'simple'
+
+        create_subtitles(
+            segments=clip['segments'],
+            clip_start=start_time,
+            output_path=ass_path,
+            mode=subtitle_mode,
+            is_lambda=is_lambda,
+            template=template
+        )
+
+        # Get target dimensions
+        config = ASPECT_RATIOS[aspect_ratio]
+        target_width = config['width']
+        target_height = config['height']
+
+        # Process with smart framing module's FFmpeg integration
+        print(f"[SmartFraming] Processing video with {len(crop_timeline)} crop keyframes...")
+
+        from smart_framing.ffmpeg_smart_crop import process_clip_with_smart_framing as smart_frame_process
+
+        smart_frame_process(
+            video_path=video_path,
+            output_path=output_path,
+            clip_start=start_time,
+            clip_end=end_time,
+            crop_timeline=crop_timeline,
+            crop_dims=crop_dims,
+            target_dims=(target_width, target_height),
+            subtitle_path=ass_path,
+            stabilize=False,  # Disable stabilization for Lambda (too slow)
+            preset='ultrafast'  # Fastest preset for Lambda
+        )
+
+        # Clean up
+        if os.path.exists(ass_path):
+            os.remove(ass_path)
+
+        print(f"[SmartFraming] ✓ Smart framing complete!")
+        return output_path
+
+    except Exception as e:
+        print(f"[SmartFraming] Error: {e}")
+        print(f"[SmartFraming] Falling back to center crop...")
+        # Fallback to traditional processing
+        return process_clip_with_karaoke_subtitles(
+            video_path, clip, output_path, aspect_ratio,
+            video_width, video_height, is_lambda, template
+        )
+
+
 def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_ratio, video_width, video_height):
     """
     Extract clip with aspect ratio conversion (no subtitles)
@@ -481,6 +738,7 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
         FFMPEG_PATH,
         '-ss', str(start_time),
         '-i', video_path,
+        '-ss', '0',  # Accurate seek
         '-t', str(duration),
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height}',
         '-c:v', 'libx264',
@@ -491,10 +749,10 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
         '-ar', '44100',
         '-ac', '2',
         '-max_muxing_queue_size', '1024',
-        '-async', '1',
-        '-vsync', 'cfr',
+        '-vsync', '2',  # VFR
+        '-copyts',
+        '-start_at_zero',
         '-movflags', '+faststart',
-        '-avoid_negative_ts', 'make_zero',
         '-threads', '0',
         '-y',
         output_path
@@ -511,9 +769,30 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
 
 
 # Copy the ASS creation functions from your existing code
-def create_karaoke_ass_fixed(segments, clip_start, output_path, is_lambda=False):
-    """Create ASS subtitle file with word-by-word karaoke highlighting"""
-    font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+def create_karaoke_ass_fixed(segments, clip_start, output_path, is_lambda=False, template=None):
+    """Create ASS subtitle file with word-by-word karaoke highlighting using template styling"""
+
+    # Use template or fallback to defaults
+    if template is None:
+        template = {}
+
+    print(f"[Template] Received template object: {template}")
+
+    font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
+    font_size = template.get('font_size', 80)
+    primary_color = template.get('primary_color', '&H00FFFFFF')
+    secondary_color = template.get('secondary_color', '&H000000FF')
+    outline_color = template.get('outline_color', '&H00000000')
+    back_color = template.get('back_color', '&H00000000')
+    highlight_color = template.get('highlight_color', '&H0000FF00')
+    outline_width = template.get('outline_width', 4)
+    shadow_depth = template.get('shadow_depth', 0)
+    margin_v = template.get('margin_v', 640)
+    alignment = template.get('alignment', 2)
+    bold = template.get('bold', -1)
+
+    print(f"[Template] Font: {font_name}, Size: {font_size}, Primary: {primary_color}, Highlight: {highlight_color}")
+    print(f"[Template] Outline: {outline_color}, Width: {outline_width}, Shadow: {shadow_depth}, Bold: {bold}")
 
     ass_content = f"""[Script Info]
 Title: Karaoke Subtitles
@@ -525,7 +804,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,640,1
+Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},10,10,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -555,19 +834,62 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     for idx, word in enumerate(line_words):
                         word_text = escape_ass_text(word['word'].strip())
                         if idx == active_idx:
-                            line_text += f"{{\\fs95\\b1\\c&H00FF00&\\3c&H000000&\\bord3\\shad2}}{word_text}{{\\r}} "
+                            # Highlighted word (use template highlight color)
+                            highlight_font_size = int(font_size * 1.2)
+                            active_style = f"{{\\fs{highlight_font_size}\\b1\\c{highlight_color}\\3c{outline_color}\\bord{outline_width}\\shad{shadow_depth}}}"
+                            line_text += f"{active_style}{word_text}{{\\r}} "
                         else:
-                            line_text += f"{{\\c&HFFFFFF&\\3c&H000000&\\bord3\\shad0}}{word_text}{{\\r}} "
+                            # Non-highlighted word (use template primary color)
+                            inactive_style = f"{{\\c{primary_color}\\3c{outline_color}\\bord{outline_width}\\shad0}}"
+                            line_text += f"{inactive_style}{word_text}{{\\r}} "
 
-                    events.append(f"Dialogue: 0,{format_ass_time(word_start)},{format_ass_time(word_end)},Default,,0,0,0,,{line_text.strip()}")
+                    dialogue_line = f"Dialogue: 0,{format_ass_time(word_start)},{format_ass_time(word_end)},Default,,0,0,0,,{line_text.strip()}"
+                    events.append(dialogue_line)
+
+                    # Debug: Show first dialogue line styling
+                    if len(events) == 1:
+                        print(f"[Template] Sample dialogue line: {dialogue_line[:150]}...")
 
     with open(output_path, 'w', encoding='utf-8-sig', newline='\n') as f:
         f.write(ass_content + '\n'.join(events))
 
+    print(f"[Template] ASS file created with {len(events)} events")
+    print(f"[Template] Style line: Default,{font_name},{font_size},{primary_color},{secondary_color},...,{outline_width},{shadow_depth}")
 
-def create_simple_ass_fixed(segments, clip_start, output_path, is_lambda=False):
-    """Create simple ASS subtitle file"""
-    font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+    # Verify file exists and show first few lines
+    if os.path.exists(output_path):
+        with open(output_path, 'r', encoding='utf-8-sig') as f:
+            lines = f.readlines()
+            print(f"[Template] ASS file has {len(lines)} total lines")
+            # Show the Style line (should be around line 11-12)
+            for i, line in enumerate(lines[:15]):
+                if line.startswith('Style:'):
+                    print(f"[Template] Actual Style line: {line.strip()}")
+                    break
+    else:
+        print(f"[Template] WARNING: ASS file not found at {output_path}")
+
+
+def create_simple_ass_fixed(segments, clip_start, output_path, is_lambda=False, template=None):
+    """Create simple ASS subtitle file with template styling"""
+
+    # Use template or fallback to defaults
+    if template is None:
+        template = {}
+
+    font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
+    font_size = template.get('font_size', 70)
+    primary_color = template.get('primary_color', '&H00FFFFFF')
+    secondary_color = template.get('secondary_color', '&H000000FF')
+    outline_color = template.get('outline_color', '&H00000000')
+    back_color = template.get('back_color', '&H80000000')
+    outline_width = template.get('outline_width', 4)
+    shadow_depth = template.get('shadow_depth', 2)
+    margin_v = template.get('margin_v', 180)
+    alignment = template.get('alignment', 2)
+    bold = template.get('bold', -1)
+
+    print(f"[Template] Simple subtitles - Font: {font_name}, Size: {font_size}")
 
     ass_content = f"""[Script Info]
 Title: Simple Subtitles
@@ -579,7 +901,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,50,50,180,1
+Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},50,50,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

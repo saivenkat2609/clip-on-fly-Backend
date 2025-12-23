@@ -508,7 +508,22 @@ def lambda_handler(event, context):
         print(f"[Transcribe] Complete in {total_time:.1f}s")
         print(f"[Transcribe] Method: {transcript['method']}")
         print(f"[Transcribe] Segments: {len(transcript['segments'])}")
- 
+
+        # Clean up local files
+        try:
+            if os.path.exists(local_video_path):
+                os.remove(local_video_path)
+                print(f"[Transcribe] Cleaned up local video: {local_video_path}")
+        except Exception as cleanup_error:
+            print(f"[Transcribe] Warning: Failed to delete video file: {cleanup_error}")
+
+        try:
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+                print(f"[Transcribe] Cleaned up audio: {audio_path}")
+        except Exception as cleanup_error:
+            print(f"[Transcribe] Warning: Failed to delete audio file: {cleanup_error}")
+
         return {
             'statusCode': 200,
             'session_id': session_id,
@@ -527,6 +542,22 @@ def lambda_handler(event, context):
         print(f"[Transcribe] Error: {str(e)}")
         import traceback
         print(f"[Transcribe] Traceback: {traceback.format_exc()}")
+
+        # Clean up on error
+        try:
+            if 'local_video_path' in locals() and os.path.exists(local_video_path):
+                os.remove(local_video_path)
+                print(f"[Transcribe] Cleaned up local video after error")
+        except Exception as cleanup_error:
+            print(f"[Transcribe] Warning: Failed to delete video file on error: {cleanup_error}")
+
+        try:
+            if 'audio_path' in locals() and os.path.exists(audio_path):
+                os.remove(audio_path)
+                print(f"[Transcribe] Cleaned up audio after error")
+        except Exception as cleanup_error:
+            print(f"[Transcribe] Warning: Failed to delete audio file on error: {cleanup_error}")
+
         raise Exception(f"Transcription failed: {str(e)}")
  
  
