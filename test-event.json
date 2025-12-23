@@ -1,0 +1,94 @@
+{
+  "user_email": "saivenkat2609@gmail.com",
+  "user_id": "wA8G7Z0tCIRQIKXyhTyXQzyKzpF3",
+  "session_id": "4f88e8d0-8e4d-4b93-a32d-b3fe309f9b17",
+  "s3_video_key": "4f88e8d0-8e4d-4b93-a32d-b3fe309f9b17/original_video.mp4",
+  "template_id": "creative-bold-energetic",
+  "clip": {
+    "start": 178.94,
+    "end": 212.32,
+    "duration": 33.379999999999995,
+    "text": "What's up, bro? You got a mortal? Come on, come  on. ",
+    "segments": [
+      {
+        "start": 178.94,
+        "end": 212.16,
+        "text": "What's up, bro? You got a mortal? Come on, come ",
+        "words": [
+          {
+            "word": "What's",
+            "start": 178.94,
+            "end": 179.3
+          },
+          {
+            "word": "up,",
+            "start": 179.3,
+            "end": 179.46
+          },
+          {
+            "word": "bro?",
+            "start": 179.46,
+            "end": 179.74
+          },
+          {
+            "word": "You",
+            "start": 180.46,
+            "end": 180.74
+          },
+          {
+            "word": "got",
+            "start": 180.74,
+            "end": 180.9
+          },
+          {
+            "word": "a",
+            "start": 180.9,
+            "end": 181.02
+          },
+          {
+            "word": "mortal?",
+            "start": 181.02,
+            "end": 181.5
+          },
+          {
+            "word": "Come",
+            "start": 211.8,
+            "end": 211.92
+          },
+          {
+            "word": "on,",
+            "start": 211.92,
+            "end": 212.04
+          },
+          {
+            "word": "come",
+            "start": 212.04,
+            "end": 212.16
+          }
+        ]
+      },
+      {
+        "start": 212.16,
+        "end": 212.32,
+        "text": "on. ",
+        "words": [
+          {
+            "word": "on.",
+            "start": 212.16,
+            "end": 212.32
+          }
+        ]
+      }
+    ],
+    "virality_score": 72,
+    "score_breakdown": {
+      "hook": 65,
+      "flow": 80,
+      "engagement": 89,
+      "trend": 50
+    },
+    "score": 72,
+    "clip_index": 1,
+    "title": "What'S Up, Bro"
+  }
+}

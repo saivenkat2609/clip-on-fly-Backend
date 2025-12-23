@@ -32,11 +32,15 @@ BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
 
 def get_cors_headers():
     """Return CORS headers for all responses"""
+    # Get allowed origins from environment (comma-separated list)
+    allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*')
+
     return {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin': allowed_origins.split(',')[0] if allowed_origins != '*' else '*',
         'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Credentials': 'true'
     }
 
 def lambda_handler(event, context):
@@ -52,6 +56,13 @@ def lambda_handler(event, context):
     http_method = event.get('httpMethod', event.get('requestContext', {}).get('http', {}).get('method', 'GET'))
     path = event.get('path', event.get('rawPath', '/'))
 
+    # Strip stage prefix from path (e.g., /prod/process -> /process)
+    # This handles both $default stage (no prefix) and named stages (e.g., /prod)
+    if path.startswith('/prod/'):
+        path = path[5:]  # Remove '/prod' prefix
+    elif path.startswith('/$default/'):
+        path = path[9:]  # Remove '/$default' prefix
+
     print(f"[API] Method: {http_method}, Path: {path}")
 
     # Handle OPTIONS preflight requests
@@ -65,6 +76,8 @@ def lambda_handler(event, context):
     # Route request
     if http_method == 'POST' and path == '/process':
         return handle_process(event)
+    elif http_method == 'POST' and path == '/reprocess-clip':
+        return handle_reprocess_clip(event)
     elif http_method == 'GET' and '/status/' in path:
         return handle_status(event, path)
     elif http_method == 'GET' and '/result/' in path:
@@ -82,12 +95,27 @@ def lambda_handler(event, context):
 def handle_process(event):
     """Handle POST /process - Start video processing"""
     try:
-        # Parse request body
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        user_id = authorizer_context.get('userId')
+        user_email = authorizer_context.get('email', '')
+
+        if not user_id:
+            print("[API] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
         youtube_url = body.get('youtube_url')
-        user_id = body.get('user_id')
-        user_email = body.get('user_email', '')
+        project_name = body.get('project_name', 'Untitled Project')
         start_from = body.get('startFrom', 'download')
+        template_id = body.get('template_id', 'prof-modern-minimal')  # Extract template_id from UI
+
         if not youtube_url:
             return {
                 'statusCode': 400,
@@ -95,19 +123,15 @@ def handle_process(event):
                 'body': json.dumps({'error': 'youtube_url is required'})
             }
 
-        if not user_id:
-            return {
-                'statusCode': 400,
-                'headers': get_cors_headers(),
-                'body': json.dumps({'error': 'user_id is required'})
-            }
-
         # Generate session ID
         session_id = str(uuid.uuid4())
 
         print(f"[API] Starting processing for session: {session_id}")
-        print(f"[API] User ID: {user_id}")
+        print(f"[API] User ID: {user_id} (verified via JWT)")
+        print(f"[API] User Email: {user_email}")
         print(f"[API] YouTube URL: {youtube_url}")
+        print(f"[API] Project Name: {project_name}")
+        print(f"[API] Template ID: {template_id}")
 
         # Start Step Functions execution
         execution = stepfunctions.start_execution(
@@ -118,7 +142,8 @@ def handle_process(event):
                 'youtube_url': youtube_url,
                 'user_id': user_id,
                 'user_email': user_email,
-                'startFrom': start_from
+                'startFrom': start_from,
+                'template_id': template_id  # Pass template_id to Step Functions
             })
         )
 
@@ -205,25 +230,128 @@ def handle_result(event, path):
 
         print(f"[API] Getting result for session: {session_id}")
 
-        # Get result from S3
-        result_key = f"{session_id}/result.json"
-        obj = s3.get_object(Bucket=BUCKET_NAME, Key=result_key)
-        result = json.loads(obj['Body'].read())
+        # SECURE: Extract verified user_id from authorizer context
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        user_id = authorizer_context.get('userId')
+
+        result_data = None
+
+        # Try user-specific location first (newer)
+        if user_id:
+            result_key = f"users/{user_id}/{session_id}/result.json"
+            try:
+                print(f"[API] Trying user-specific location: {result_key}")
+                obj = s3.get_object(Bucket=BUCKET_NAME, Key=result_key)
+                result_data = json.loads(obj['Body'].read())
+                print(f"[API] Found result in user-specific location")
+            except s3.exceptions.NoSuchKey:
+                print(f"[API] Not found in user-specific location")
+                result_data = None
+
+        # Fallback to legacy location
+        if not result_data:
+            result_key = f"{session_id}/result.json"
+            try:
+                print(f"[API] Trying legacy location: {result_key}")
+                obj = s3.get_object(Bucket=BUCKET_NAME, Key=result_key)
+                result_data = json.loads(obj['Body'].read())
+                print(f"[API] Found result in legacy location")
+            except s3.exceptions.NoSuchKey:
+                return {
+                    'statusCode': 404,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({'error': 'Result not found'})
+                }
 
         return {
             'statusCode': 200,
             'headers': get_cors_headers(),
-            'body': json.dumps(result)
+            'body': json.dumps(result_data)
         }
 
-    except s3.exceptions.NoSuchKey:
-        return {
-            'statusCode': 404,
-            'headers': get_cors_headers(),
-            'body': json.dumps({'error': 'Result not found'})
-        }
     except Exception as e:
         print(f"[API] Error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'headers': get_cors_headers(),
+            'body': json.dumps({'error': str(e)})
+        }
+
+
+def handle_reprocess_clip(event):
+    """Handle POST /reprocess-clip - Reprocess a single clip with new template"""
+    try:
+        # SECURE: Extract verified user_id from authorizer context
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        user_id = authorizer_context.get('userId')
+        user_email = authorizer_context.get('email', '')
+
+        if not user_id:
+            print("[API] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Parse request body
+        body = json.loads(event.get('body', '{}'))
+        session_id = body.get('session_id')
+        clip_index = body.get('clip_index')
+        template_id = body.get('template_id')
+
+        if not session_id or clip_index is None or not template_id:
+            return {
+                'statusCode': 400,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'session_id, clip_index, and template_id are required'})
+            }
+
+        print(f"[API] Reprocessing clip - Session: {session_id}, Clip: {clip_index}, Template: {template_id}")
+        print(f"[API] User ID: {user_id} (verified via JWT)")
+
+        # TODO: Verify user owns this session before reprocessing
+        # For now, we'll allow any authenticated user to reprocess
+
+        # Invoke reprocess-clip Lambda
+        lambda_client = boto3.client('lambda')
+
+        reprocess_payload = {
+            'session_id': session_id,
+            'clip_index': clip_index,
+            'template_id': template_id,
+            'user_id': user_id  # Pass for future authorization checks
+        }
+
+        print(f"[API] Invoking opus-reprocess-clip Lambda asynchronously...")
+
+        # Invoke asynchronously (processing takes ~55s, exceeds API Gateway 29s timeout)
+        # Client will poll /result/{session_id} to check for completion
+        response = lambda_client.invoke(
+            FunctionName='opus-reprocess-clip',
+            InvocationType='Event',  # Asynchronous invocation
+            Payload=json.dumps(reprocess_payload)
+        )
+
+        print(f"[API] Async invocation started (StatusCode: {response['StatusCode']})")
+
+        # Return immediately with 202 Accepted
+        return {
+            'statusCode': 202,
+            'headers': get_cors_headers(),
+            'body': json.dumps({
+                'message': 'Reprocessing started',
+                'session_id': session_id,
+                'clip_index': clip_index,
+                'template_id': template_id,
+                'status': 'processing'
+            })
+        }
+
+    except Exception as e:
+        print(f"[API] Error: {str(e)}")
+        import traceback
+        print(f"[API] Traceback: {traceback.format_exc()}")
         return {
             'statusCode': 500,
             'headers': get_cors_headers(),
@@ -234,10 +362,33 @@ def handle_result(event, path):
 def handle_user_videos(event, path):
     """Handle GET /user/{user_id}/videos - Get all videos for a user"""
     try:
-        # Extract user ID from path
-        user_id = path.split('/user/')[-1].split('/videos')[0]
+        # SECURE: Extract verified user_id from authorizer context
+        # For HTTP API v2 Lambda authorizers, context is nested under 'lambda' key
+        authorizer_context = event.get('requestContext', {}).get('authorizer', {}).get('lambda', {})
+        authenticated_user_id = authorizer_context.get('userId')
 
-        print(f"[API] Getting videos for user: {user_id}")
+        if not authenticated_user_id:
+            print("[API] ERROR: No user_id in authorizer context - request unauthorized")
+            return {
+                'statusCode': 401,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
+            }
+
+        # Extract user ID from path
+        requested_user_id = path.split('/user/')[-1].split('/videos')[0]
+
+        # Verify the authenticated user is requesting their own videos
+        if authenticated_user_id != requested_user_id:
+            print(f"[API] ERROR: User {authenticated_user_id} attempted to access videos of user {requested_user_id}")
+            return {
+                'statusCode': 403,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Forbidden - You can only access your own videos'})
+            }
+
+        user_id = authenticated_user_id
+        print(f"[API] Getting videos for user: {user_id} (verified via JWT)")
 
         # List all objects in user's directory
         user_prefix = f"users/{user_id}/"

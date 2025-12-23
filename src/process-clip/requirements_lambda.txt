@@ -1,0 +1,34 @@
+# Lambda Deployment Requirements for Smart Framing
+# Use this file when deploying to AWS Lambda
+# Install with: pip install -r requirements_lambda.txt -t python/
+
+# Core dependencies
+numpy==1.24.3
+scipy==1.11.4
+
+# OpenCV (HEADLESS version for Lambda - no GUI dependencies)
+opencv-python-headless==4.8.1.78
+
+# MediaPipe for face detection (~30MB, Lambda-compatible)
+mediapipe==0.10.9
+protobuf==3.20.3  # Required by MediaPipe
+
+# Note: boto3 is provided by Lambda runtime, no need to include
+
+# Deployment Notes:
+# 1. Create Lambda layer with these dependencies:
+#    pip install -r requirements_lambda.txt -t python/
+#    zip -r smart-framing-layer.zip python/
+#
+# 2. Upload layer to Lambda (must be < 250MB unzipped)
+#
+# 3. Set environment variables:
+#    ENABLE_SMART_FRAMING=true
+#    ASPECT_RATIO=9:16
+#
+# 4. Ensure FFmpeg layer is attached at /opt/bin/ffmpeg
+#
+# 5. Recommended Lambda configuration:
+#    Memory: 2048-3008 MB (for face detection)
+#    Timeout: 900s (15 minutes)
+#    Ephemeral storage: 1024-2048 MB

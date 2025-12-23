@@ -7,6 +7,7 @@ import json
 import boto3
 import os
 import re
+import requests
 # Storage helper - works with S3, R2, B2, and any S3-compatible storage
 def get_storage_client():
     """Get S3-compatible storage client (supports AWS S3, Cloudflare R2, Backblaze B2, etc.)"""
@@ -85,6 +86,11 @@ def lambda_handler(event, context):
         print(f"[Detect] Session: {session_id}")
         print(f"[Detect] Transcript: {transcript_key}")
         print(f"[Detect] AI Scoring: {'Enabled (Groq)' if USE_AI_SCORING and GROQ_API_KEY else 'Disabled (fallback)'}")
+        # Debug: Check if API key is set
+        if GROQ_API_KEY:
+            print(f"[Detect] GROQ_API_KEY present: {GROQ_API_KEY[:8]}...{GROQ_API_KEY[-4:]}")
+        else:
+            print(f"[Detect] WARNING: GROQ_API_KEY not set!")
 
         # Download transcript from S3
         obj = s3.get_object(Bucket=BUCKET_NAME, Key=transcript_key)
@@ -172,13 +178,15 @@ Respond ONLY with valid JSON array (no markdown, no extra text):
   {{"start_time": 120.0, "end_time": 165.5, "virality_score": 82, "hook_score": 85, "flow_score": 80, "engagement_score": 83, "trend_score": 80}}
 ]"""
 
-    import urllib.request
-    import urllib.error
-
     url = "https://api.groq.com/openai/v1/chat/completions"
 
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     request_data = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "llama-3.1-70b-versatile",  # Using stable model
         "messages": [
             {
                 "role": "system",
@@ -193,29 +201,16 @@ Respond ONLY with valid JSON array (no markdown, no extra text):
         "max_tokens": 1000
     }
 
-    # Convert to JSON bytes
-    json_data = json.dumps(request_data).encode('utf-8')
-
-    # Create request with headers
-    req = urllib.request.Request(
-        url,
-        data=json_data,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
-    )
-
-    # Make API call
+    # Make API call using requests library (same as transcribe-apis)
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            response_data = response.read().decode('utf-8')
-            result = json.loads(response_data)
-            ai_response = result['choices'][0]['message']['content'].strip()
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8') if e.fp else str(e)
-        raise Exception(f"Groq API error ({e.code}): {error_body}")
-    except urllib.error.URLError as e:
+        response = requests.post(url, headers=headers, json=request_data, timeout=30)
+
+        if response.status_code != 200:
+            raise Exception(f"Groq API error ({response.status_code}): {response.text}")
+
+        result = response.json()
+        ai_response = result['choices'][0]['message']['content'].strip()
+    except requests.exceptions.RequestException as e:
         raise Exception(f"Groq API connection error: {str(e)}")
 
     print(f"[Detect] AI Response: {ai_response[:200]}...")
@@ -451,9 +446,6 @@ def generate_clip_title_ai(text, virality_score, score_breakdown):
         return generate_fallback_title(text)
 
     try:
-        import urllib.request
-        import urllib.error
-
         print(f"[Detect] Generating title with Groq AI...")
 
         # Prepare prompt for title generation
@@ -483,8 +475,13 @@ Respond with ONLY the title text, no quotes, no extra text:"""
 
         url = "https://api.groq.com/openai/v1/chat/completions"
 
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+
         request_data = {
-            "model": "llama-3.3-70b-versatile",
+            "model": "llama-3.1-70b-versatile",  # Using stable model
             "messages": [
                 {
                     "role": "system",
@@ -499,25 +496,16 @@ Respond with ONLY the title text, no quotes, no extra text:"""
             "max_tokens": 50
         }
 
-        # Convert to JSON bytes
-        json_data = json.dumps(request_data).encode('utf-8')
-
-        # Create request with headers
-        req = urllib.request.Request(
-            url,
-            data=json_data,
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            }
-        )
-
-        # Make API call
+        # Make API call using requests library
         try:
-            with urllib.request.urlopen(req, timeout=15) as response:
-                response_data = response.read().decode('utf-8')
-                result = json.loads(response_data)
-                ai_title = result['choices'][0]['message']['content'].strip()
+            response = requests.post(url, headers=headers, json=request_data, timeout=15)
+
+            if response.status_code != 200:
+                print(f"[Detect] Title generation API error ({response.status_code}): {response.text}")
+                return generate_fallback_title(text)
+
+            result = response.json()
+            ai_title = result['choices'][0]['message']['content'].strip()
         except Exception as e:
             print(f"[Detect] Title generation API error: {str(e)}")
             return generate_fallback_title(text)

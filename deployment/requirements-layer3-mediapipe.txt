@@ -1,0 +1,3 @@
+# Layer 3: MediaPipe and Protobuf
+mediapipe==0.10.9
+protobuf==3.20.3

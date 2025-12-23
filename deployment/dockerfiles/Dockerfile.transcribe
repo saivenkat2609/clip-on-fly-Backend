@@ -26,14 +26,14 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
  
 # Copy requirements file
-COPY ../requirements-docker-transcribe.txt requirements-transcribe.txt
+COPY deployment/requirements-docker-transcribe.txt requirements-transcribe.txt
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements-transcribe.txt
 
 # Copy the Lambda function code
-COPY ../../src/transcribe/lambda_function.py lambda_function.py
+COPY src/transcribe/lambda_function.py lambda_function.py
  
 # Pre-download the Whisper model to reduce cold start time
 # This adds the model to the container image
