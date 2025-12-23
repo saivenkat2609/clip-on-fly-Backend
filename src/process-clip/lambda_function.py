@@ -27,22 +27,6 @@ except ImportError as e:
     SMART_FRAMING_AVAILABLE = False
     print(f"[SmartFraming] Smart framing not available: {e}")
 
-# Smart Framing imports (optional - graceful fallback if not available)
-try:
-    from smart_framing import (
-        create_detector,
-        correlate_faces_with_speech,
-        calculate_smart_crop,
-        process_clip_with_smart_framing,
-        create_subtitles,
-        ASPECT_RATIOS as SMART_ASPECT_RATIOS
-    )
-    SMART_FRAMING_AVAILABLE = True
-    print("[SmartFraming] Smart framing module loaded successfully")
-except ImportError as e:
-    SMART_FRAMING_AVAILABLE = False
-    print(f"[SmartFraming] Smart framing not available: {e}")
-
 def get_storage_client():
     """Get S3-compatible storage client"""
     endpoint = os.environ.get('R2_ENDPOINT') or os.environ.get('STORAGE_ENDPOINT')
@@ -323,12 +307,19 @@ def lambda_handler(event, context):
         # Process with smart framing or traditional cropping
         start_process = time.time()
 
+        # Check if caller explicitly wants to skip smart framing (e.g., reprocessing)
+        skip_smart_framing = event.get('skip_smart_framing', False)
+
         # Check if smart framing is enabled and available
         use_smart_framing = (
+            not skip_smart_framing and  # Don't use if explicitly skipped
             ENABLE_SMART_FRAMING and
             SMART_FRAMING_AVAILABLE and
             clip.get('segments')  # Need transcript for speaker tracking
         )
+
+        if skip_smart_framing:
+            print(f"[ProcessClip] Smart framing skipped (reprocessing mode for faster template changes)")
 
         if use_smart_framing:
             print(f"[ProcessClip] Processing with SMART FRAMING + subtitles...")
@@ -339,7 +330,8 @@ def lambda_handler(event, context):
                 aspect_ratio,
                 video_width,
                 video_height,
-                is_lambda
+                is_lambda,
+                template
             )
         else:
             # Traditional center-crop processing
@@ -358,9 +350,9 @@ def lambda_handler(event, context):
             )
 
 
-        print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
-        print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
-        print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
+            print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
+            print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
+            print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
             if ADD_SUBTITLES and clip.get('segments'):
                 if has_word_timestamps:
                     print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
@@ -407,7 +399,7 @@ def lambda_handler(event, context):
         output_size_mb = os.path.getsize(final_clip_path) / (1024*1024)
         print(f"[TIMING] Processing: {process_time:.2f}s (output: {output_size_mb:.2f} MB)")
 
-        # Upload to S3
+        # Upload to S3 (always use same key - overwrite for reprocessing)
         s3_clip_key = f"{session_id}/clips/clip_{clip_index}_{aspect_ratio.replace(':', 'x')}.mp4"
         print(f"[ProcessClip] Uploading to S3: {s3_clip_key}")
 
@@ -622,7 +614,7 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
     return output_path
 
 
-def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False):
+def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect_ratio, video_width, video_height, is_lambda=False, template=None):
     """
     SMART FRAMING VERSION: Face detection + speaker tracking + dynamic crop + subtitles
     Uses the smart_framing module for intelligent speaker-focused cropping
@@ -688,7 +680,8 @@ def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect
             clip_start=start_time,
             output_path=ass_path,
             mode=subtitle_mode,
-            is_lambda=is_lambda
+            is_lambda=is_lambda,
+            template=template
         )
 
         # Get target dimensions
@@ -727,7 +720,7 @@ def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect
         # Fallback to traditional processing
         return process_clip_with_karaoke_subtitles(
             video_path, clip, output_path, aspect_ratio,
-            video_width, video_height, is_lambda
+            video_width, video_height, is_lambda, template
         )
 
 
@@ -783,6 +776,8 @@ def create_karaoke_ass_fixed(segments, clip_start, output_path, is_lambda=False,
     if template is None:
         template = {}
 
+    print(f"[Template] Received template object: {template}")
+
     font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
     font_size = template.get('font_size', 80)
     primary_color = template.get('primary_color', '&H00FFFFFF')
@@ -797,6 +792,7 @@ def create_karaoke_ass_fixed(segments, clip_start, output_path, is_lambda=False,
     bold = template.get('bold', -1)
 
     print(f"[Template] Font: {font_name}, Size: {font_size}, Primary: {primary_color}, Highlight: {highlight_color}")
+    print(f"[Template] Outline: {outline_color}, Width: {outline_width}, Shadow: {shadow_depth}, Bold: {bold}")
 
     ass_content = f"""[Script Info]
 Title: Karaoke Subtitles
@@ -840,15 +836,38 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         if idx == active_idx:
                             # Highlighted word (use template highlight color)
                             highlight_font_size = int(font_size * 1.2)
-                            line_text += f"{{\\fs{highlight_font_size}\\b1\\c{highlight_color}\\3c{outline_color}\\bord{outline_width}\\shad{shadow_depth}}}{word_text}{{\\r}} "
+                            active_style = f"{{\\fs{highlight_font_size}\\b1\\c{highlight_color}\\3c{outline_color}\\bord{outline_width}\\shad{shadow_depth}}}"
+                            line_text += f"{active_style}{word_text}{{\\r}} "
                         else:
                             # Non-highlighted word (use template primary color)
-                            line_text += f"{{\\c{primary_color}\\3c{outline_color}\\bord{outline_width}\\shad0}}{word_text}{{\\r}} "
+                            inactive_style = f"{{\\c{primary_color}\\3c{outline_color}\\bord{outline_width}\\shad0}}"
+                            line_text += f"{inactive_style}{word_text}{{\\r}} "
 
-                    events.append(f"Dialogue: 0,{format_ass_time(word_start)},{format_ass_time(word_end)},Default,,0,0,0,,{line_text.strip()}")
+                    dialogue_line = f"Dialogue: 0,{format_ass_time(word_start)},{format_ass_time(word_end)},Default,,0,0,0,,{line_text.strip()}"
+                    events.append(dialogue_line)
+
+                    # Debug: Show first dialogue line styling
+                    if len(events) == 1:
+                        print(f"[Template] Sample dialogue line: {dialogue_line[:150]}...")
 
     with open(output_path, 'w', encoding='utf-8-sig', newline='\n') as f:
         f.write(ass_content + '\n'.join(events))
+
+    print(f"[Template] ASS file created with {len(events)} events")
+    print(f"[Template] Style line: Default,{font_name},{font_size},{primary_color},{secondary_color},...,{outline_width},{shadow_depth}")
+
+    # Verify file exists and show first few lines
+    if os.path.exists(output_path):
+        with open(output_path, 'r', encoding='utf-8-sig') as f:
+            lines = f.readlines()
+            print(f"[Template] ASS file has {len(lines)} total lines")
+            # Show the Style line (should be around line 11-12)
+            for i, line in enumerate(lines[:15]):
+                if line.startswith('Style:'):
+                    print(f"[Template] Actual Style line: {line.strip()}")
+                    break
+    else:
+        print(f"[Template] WARNING: ASS file not found at {output_path}")
 
 
 def create_simple_ass_fixed(segments, clip_start, output_path, is_lambda=False, template=None):
