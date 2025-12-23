@@ -20,7 +20,8 @@ def create_karaoke_ass(
     segments: List[Dict],
     clip_start: float,
     output_path: str,
-    is_lambda: bool = None
+    is_lambda: bool = None,
+    template: Dict = None
 ) -> str:
     """
     Create ASS subtitle file with word-by-word karaoke highlighting.
@@ -33,6 +34,7 @@ def create_karaoke_ass(
         clip_start: Clip start time in seconds (to adjust timestamps)
         output_path: Path to save ASS file
         is_lambda: Whether running in Lambda (None = auto-detect)
+        template: Template configuration dict with styling
 
     Returns:
         Path to created ASS file
@@ -52,11 +54,39 @@ def create_karaoke_ass(
     if is_lambda is None:
         is_lambda = os.path.exists('/var/task') or os.path.exists('/opt/bin/ffmpeg')
 
-    # Font selection based on environment
-    font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+    # Use template styling or fallback to defaults
+    if template:
+        font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
+        font_size = template.get('font_size', 80)
+        primary_color = template.get('primary_color', '&H00FFFFFF')
+        secondary_color = template.get('secondary_color', '&H000000FF')
+        highlight_color = template.get('highlight_color', '&H0000FF00')
+        outline_color = template.get('outline_color', '&H00000000')
+        back_color = template.get('back_color', '&H00000000')
+        bold = template.get('bold', -1)
+        outline_width = template.get('outline_width', 4)
+        shadow_depth = template.get('shadow_depth', 0)
+        margin_v = template.get('margin_v', 640)
+        alignment = template.get('alignment', 2)
+    else:
+        font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+        font_size = 80
+        primary_color = '&H00FFFFFF'
+        secondary_color = '&H000000FF'
+        highlight_color = '&H0000FF00'
+        outline_color = '&H00000000'
+        back_color = '&H00000000'
+        bold = -1
+        outline_width = 4
+        shadow_depth = 0
+        margin_v = 640
+        alignment = 2
 
     print(f"[Subtitles] Creating karaoke ASS file: {output_path}")
     print(f"[Subtitles] Environment: {'Lambda' if is_lambda else 'Local'}, Font: {font_name}")
+    if template:
+        print(f"[Subtitles] Using template: {template.get('name', 'Unknown')}")
+    print(f"[Subtitles] Styling - Font: {font_name}, Size: {font_size}, Primary: {primary_color}, Highlight: {highlight_color}, Outline: {outline_width}")
 
     # ASS file header with styling
     ass_content = f"""[Script Info]
@@ -69,7 +99,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},80,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,4,0,2,10,10,640,1
+Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},10,10,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -107,11 +137,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         word_text = escape_ass_text(word['word'].strip())
 
                         if idx == active_idx:
-                            # Active word: larger, bold, green with strong outline
-                            line_text += f"{{\\fs95\\b1\\c&H00FF00&\\3c&H000000&\\bord3\\shad2}}{word_text}{{\\r}} "
+                            # Active word: use template highlight styling
+                            highlight_font_size = int(font_size * 1.2)  # 20% larger than base
+                            line_text += f"{{\\fs{highlight_font_size}\\b1\\c{highlight_color}\\3c{outline_color}\\bord{outline_width}\\shad{shadow_depth}}}{word_text}{{\\r}} "
                         else:
-                            # Inactive words: normal white with outline
-                            line_text += f"{{\\c&HFFFFFF&\\3c&H000000&\\bord3\\shad0}}{word_text}{{\\r}} "
+                            # Inactive words: use template primary styling
+                            line_text += f"{{\\c{primary_color}\\3c{outline_color}\\bord{outline_width}\\shad0}}{word_text}{{\\r}} "
 
                     events.append(f"Dialogue: 0,{format_ass_time(word_start)},{format_ass_time(word_end)},Default,,0,0,0,,{line_text.strip()}")
                     total_words += 1
@@ -128,7 +159,8 @@ def create_simple_ass(
     segments: List[Dict],
     clip_start: float,
     output_path: str,
-    is_lambda: bool = None
+    is_lambda: bool = None,
+    template: Dict = None
 ) -> str:
     """
     Create simple ASS subtitle file with segment-level text.
@@ -141,6 +173,7 @@ def create_simple_ass(
         clip_start: Clip start time in seconds
         output_path: Path to save ASS file
         is_lambda: Whether running in Lambda (None = auto-detect)
+        template: Template configuration dict with styling
 
     Returns:
         Path to created ASS file
@@ -149,11 +182,38 @@ def create_simple_ass(
     if is_lambda is None:
         is_lambda = os.path.exists('/var/task') or os.path.exists('/opt/bin/ffmpeg')
 
-    # Font selection based on environment
-    font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+    # Use template styling or fallback to defaults
+    if template:
+        font_name = template.get('font', 'DejaVu Sans' if is_lambda else 'Arial')
+        font_size = template.get('font_size', 70)
+        primary_color = template.get('primary_color', '&H00FFFFFF')
+        secondary_color = template.get('secondary_color', '&H000000FF')
+        highlight_color = template.get('highlight_color', '&H0000FF00')
+        outline_color = template.get('outline_color', '&H00000000')
+        back_color = template.get('back_color', '&H80000000')
+        bold = template.get('bold', -1)
+        outline_width = template.get('outline_width', 4)
+        shadow_depth = template.get('shadow_depth', 2)
+        margin_v = template.get('margin_v', 180)
+        alignment = template.get('alignment', 2)
+    else:
+        font_name = 'DejaVu Sans' if is_lambda else 'Arial'
+        font_size = 70
+        primary_color = '&H00FFFFFF'
+        secondary_color = '&H000000FF'
+        highlight_color = '&H0000FF00'
+        outline_color = '&H00000000'
+        back_color = '&H80000000'
+        bold = -1
+        outline_width = 4
+        shadow_depth = 2
+        margin_v = 180
+        alignment = 2
 
     print(f"[Subtitles] Creating simple ASS file: {output_path}")
     print(f"[Subtitles] Environment: {'Lambda' if is_lambda else 'Local'}, Font: {font_name}")
+    if template:
+        print(f"[Subtitles] Using template: {template.get('name', 'Unknown')}")
 
     # ASS file header with styling
     ass_content = f"""[Script Info]
@@ -166,7 +226,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},70,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,4,2,2,50,50,180,1
+Style: Default,{font_name},{font_size},{primary_color},{secondary_color},{outline_color},{back_color},{bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},{alignment},50,50,{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -245,7 +305,8 @@ def create_subtitles(
     clip_start: float,
     output_path: str,
     mode: str = 'karaoke',
-    is_lambda: bool = None
+    is_lambda: bool = None,
+    template: Dict = None
 ) -> str:
     """
     Convenience function to create subtitles in specified mode.
@@ -256,6 +317,7 @@ def create_subtitles(
         output_path: Output ASS file path
         mode: 'karaoke' or 'simple'
         is_lambda: Lambda environment flag
+        template: Template configuration dict with styling
 
     Returns:
         Path to created ASS file
@@ -263,9 +325,9 @@ def create_subtitles(
     mode = mode.lower()
 
     if mode == 'karaoke':
-        return create_karaoke_ass(segments, clip_start, output_path, is_lambda)
+        return create_karaoke_ass(segments, clip_start, output_path, is_lambda, template)
     elif mode == 'simple':
-        return create_simple_ass(segments, clip_start, output_path, is_lambda)
+        return create_simple_ass(segments, clip_start, output_path, is_lambda, template)
     else:
         raise ValueError(f"Invalid subtitle mode: {mode}. Use 'karaoke' or 'simple'")
 

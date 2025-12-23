@@ -211,6 +211,7 @@ def handle_start_processing(event):
         video_title = body.get('videoTitle', 'Uploaded Video')
         video_description = body.get('videoDescription', '')
         s3_key = body.get('s3_key')
+        template_id = body.get('template_id', 'prof-modern-minimal')  # Extract template_id from UI
 
         if not session_id:
             return {
@@ -226,6 +227,7 @@ def handle_start_processing(event):
         print(f"[API-Upload] User ID: {user_id} (verified via JWT)")
         print(f"[API-Upload] User Email: {user_email}")
         print(f"[API-Upload] S3 Key: {s3_key}")
+        print(f"[API-Upload] Template ID: {template_id}")
 
         # Verify upload exists (optional - Worker already confirmed upload)
         try:
@@ -247,7 +249,8 @@ def handle_start_processing(event):
                 'user_email': user_email,
                 'video_title': video_title,
                 'video_description': video_description,
-                'source': 'upload'
+                'source': 'upload',
+                'template_id': template_id  # Pass template_id to Step Functions
             })
         )
 

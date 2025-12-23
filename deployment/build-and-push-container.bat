@@ -87,39 +87,54 @@ if %errorlevel% neq 0 (
 echo Authentication successful.
 echo.
 
-REM Check if image already exists locally
-echo [3/5] Checking for existing Docker image...
-docker image inspect %ECR_REPO%:%IMAGE_TAG% >nul 2>&1
+REM Remove old local image to force fresh build with code changes
+echo [3/6] Removing old local image (if exists)...
+docker rmi %ECR_REPO%:%IMAGE_TAG% >nul 2>&1
 if %errorlevel% equ 0 (
-    echo Image %ECR_REPO%:%IMAGE_TAG% already exists locally.
-    echo Skipping build, will use existing image.
+    echo Old local image removed.
 ) else (
-    echo Image not found locally, building...
-    echo This may take 5-10 minutes...
-    cd ..
-    docker build ^
-        --platform linux/amd64 ^
-        -t %ECR_REPO%:%IMAGE_TAG% ^
-        -f deployment/dockerfiles/Dockerfile.process-clip ^
-        .
-    cd deployment
-    REM Verify the image was actually created
-    docker image inspect %ECR_REPO%:%IMAGE_TAG% >nul 2>&1
-    if %errorlevel% neq 0 (
-        echo ERROR: Docker build failed - image not found
-        exit /b 1
-    )
-    echo Build successful.
+    echo No local image to remove.
 )
 echo.
 
+REM Pull latest image from ECR to use as cache (if available)
+echo [4/6] Pulling latest image from ECR for cache...
+docker pull %ECR_URI%:%IMAGE_TAG% >nul 2>&1
+if %errorlevel% equ 0 (
+    echo Latest image pulled successfully, will use as build cache.
+) else (
+    echo No existing image in ECR or pull failed, building from scratch.
+)
+echo.
+
+REM Build Docker image (always build, with fresh code detection)
+echo [5/6] Building Docker image...
+echo This may take 5-10 minutes on first build, faster on subsequent builds...
+cd ..
+docker build ^
+    --platform linux/amd64 ^
+    --pull ^
+    --cache-from %ECR_URI%:%IMAGE_TAG% ^
+    -t %ECR_REPO%:%IMAGE_TAG% ^
+    -f deployment/dockerfiles/Dockerfile.process-clip ^
+    .
+cd deployment
+REM Verify the image was actually created
+docker image inspect %ECR_REPO%:%IMAGE_TAG% >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ERROR: Docker build failed - image not found
+    exit /b 1
+)
+echo Build successful.
+echo.
+
 REM Tag image for ECR
-echo [4/5] Tagging image for ECR...
+echo [6/7] Tagging image for ECR...
 docker tag %ECR_REPO%:%IMAGE_TAG% %ECR_URI%:%IMAGE_TAG%
 echo.
 
 REM Push image to ECR
-echo [5/5] Pushing image to ECR...
+echo [7/7] Pushing image to ECR...
 echo This may take several minutes...
 docker push %ECR_URI%:%IMAGE_TAG%
 if %errorlevel% neq 0 (

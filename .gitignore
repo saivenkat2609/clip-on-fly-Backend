@@ -41,6 +41,7 @@ deployment/container-image-uri.txt
 # Lambda Layers
 *-layer/
 lambda_layer.zip
+src/detect-clips/urllib3/
 
 # Logs
 *.log
