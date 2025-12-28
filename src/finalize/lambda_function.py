@@ -1,6 +1,7 @@
 """
 Lambda Function 5: Finalize Processing
 Aggregates results and generates pre-signed URLs
+INTEGRATED: With logging, metrics, DynamoDB tracking, and WebSocket notifications
 """
 import json
 import boto3
@@ -10,6 +11,28 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, timedelta
+import sys
+
+# Add Lambda Layer path
+sys.path.insert(0, '/opt/python')
+
+# Import scalability utilities (graceful fallback)
+try:
+    from shared.logger import get_logger
+    from shared.websocket_notifier import notify_processing_complete
+    from shared.dynamodb_client import update_video_session
+    from shared.metrics import track_video_processing_complete
+    UTILITIES_AVAILABLE = True
+    print("[Finalize] Scalability utilities loaded successfully")
+except ImportError as e:
+    print(f"[Finalize] Warning: Shared utilities not available: {str(e)}")
+    UTILITIES_AVAILABLE = False
+
+# Initialize logger if available
+if UTILITIES_AVAILABLE:
+    logger = get_logger('finalize')
+else:
+    logger = None
 
 def get_storage_client():
     """Get S3-compatible storage client (supports AWS S3, Cloudflare R2, Backblaze B2, etc.)"""
@@ -245,6 +268,10 @@ def lambda_handler(event, context):
         print(f"[Finalize] User ID: {user_id}")
         print(f"[Finalize] Processing {len(processed_clips)} clips")
 
+        # Log start
+        if logger:
+            logger.info("Finalizing clips", session_id=session_id, user_id=user_id, clip_count=len(processed_clips))
+
         # Calculate expiry timestamp (3 days from now)
         expiry_time = datetime.utcnow() + timedelta(days=3)
         expiry_unix = int(expiry_time.timestamp())
@@ -346,6 +373,23 @@ def lambda_handler(event, context):
         if user_id:
             update_firestore_video(user_id, session_id, result)
             update_user_stats(user_id, len(clip_urls))
+
+        # Update session and notify via WebSocket
+        if UTILITIES_AVAILABLE and user_id:
+            try:
+                update_video_session(
+                    session_id, user_id,
+                    status='completed',
+                    current_step='All clips ready',
+                    clips_count=len(clip_urls)
+                )
+                notify_processing_complete(session_id, {'total_clips': len(clip_urls), 'status': 'completed'})
+                track_video_processing_complete(session_id, len(clip_urls))
+            except Exception as e:
+                print(f"[Finalize] Warning: Notification failed: {e}")
+
+        if logger:
+            logger.info("Finalization complete", session_id=session_id, clip_count=len(clip_urls))
 
         return {
             'statusCode': 200,

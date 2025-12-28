@@ -1,7 +1,5 @@
-# NO DEPENDENCIES NEEDED!
-# This lambda only uses:
-# - boto3 (built-in to Lambda)
-# - urllib (Python standard library)
-# - json, os, re (Python standard library)
-
-# Empty requirements - nothing to install
+# Dependencies for detect-clips Lambda
+# boto3 (built-in to Lambda)
+# requests (already included, used for Groq API)
+requests==2.32.5
+redis==5.0.1  # For caching (optional, Lambda will work without it)

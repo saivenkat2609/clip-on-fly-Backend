@@ -1,0 +1,293 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch Alarms and Monitoring for Video Processing Application'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  AlertEmail:
+    Type: String
+    Description: Email address for alarm notifications
+    Default: alerts@example.com
+
+  VideoProcessingQueueName:
+    Type: String
+    Description: Name of video processing SQS queue
+    Default: prod-video-processing-queue
+
+  UploadProcessingQueueName:
+    Type: String
+    Description: Name of upload processing SQS queue
+    Default: prod-upload-processing-queue
+
+Resources:
+  # SNS Topic for Alerts
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-video-processing-alerts'
+      DisplayName: Video Processing Alerts
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Function Alarms
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-lambda-high-error-rate'
+      AlarmDescription: Alert when Lambda error rate exceeds 5%
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 2
+      Threshold: 10  # 10 errors in 10 minutes
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  LambdaThrottlingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-lambda-throttling'
+      AlarmDescription: Alert when Lambda functions are throttled
+      MetricName: Throttles
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 60  # 1 minute
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  LambdaConcurrentExecutionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-lambda-concurrent-executions-high'
+      AlarmDescription: Alert when concurrent executions approach limit
+      MetricName: ConcurrentExecutions
+      Namespace: AWS/Lambda
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 3
+      Threshold: 800  # Alert at 80% of 1000 limit
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  # API Gateway Alarms
+  APIGatewayHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-api-gateway-high-latency'
+      AlarmDescription: Alert when API Gateway p95 latency exceeds 3 seconds
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      ExtendedStatistic: p95
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 2
+      Threshold: 3000  # 3 seconds in milliseconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  APIGateway5XXErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-api-gateway-5xx-errors'
+      AlarmDescription: Alert when API Gateway 5XX errors exceed threshold
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  APIGateway4XXErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-api-gateway-4xx-errors'
+      AlarmDescription: Alert when API Gateway 4XX errors exceed threshold
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100  # High threshold, we expect some 4xx
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  # SQS Queue Alarms
+  VideoQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-video-queue-depth-high'
+      AlarmDescription: Alert when video processing queue depth exceeds threshold (backlog building)
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref VideoProcessingQueueName
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  VideoQueueOldestMessageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-video-queue-oldest-message'
+      AlarmDescription: Alert when messages sit in queue for too long
+      MetricName: ApproximateAgeOfOldestMessage
+      Namespace: AWS/SQS
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1800  # 30 minutes
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref VideoProcessingQueueName
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  # Step Functions Alarms
+  StepFunctionsExecutionFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-step-functions-execution-failed'
+      AlarmDescription: Alert when Step Functions executions fail
+      MetricName: ExecutionsFailed
+      Namespace: AWS/States
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  StepFunctionsExecutionTimeoutAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-step-functions-execution-timeout'
+      AlarmDescription: Alert when Step Functions executions timeout
+      MetricName: ExecutionsTimedOut
+      Namespace: AWS/States
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  # Custom Application Metrics Alarms
+  HighVideoProcessingTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-video-processing-time-high'
+      AlarmDescription: Alert when video processing time exceeds threshold
+      MetricName: VideoProcessingTime
+      Namespace: VideoProcessing
+      ExtendedStatistic: p95
+      Period: 600  # 10 minutes
+      EvaluationPeriods: 1
+      Threshold: 300000  # 5 minutes in milliseconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  LowCacheHitRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-cache-hit-rate-low'
+      AlarmDescription: Alert when cache hit rate drops below threshold
+      Metrics:
+        - Id: hit_rate
+          Expression: 'm1 / (m1 + m2) * 100'
+          Label: Cache Hit Rate
+        - Id: m1
+          MetricStat:
+            Metric:
+              Namespace: VideoProcessing
+              MetricName: CacheHits
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: m2
+          MetricStat:
+            Metric:
+              Namespace: VideoProcessing
+              MetricName: CacheMisses
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+      EvaluationPeriods: 2
+      Threshold: 50  # Alert if hit rate < 50%
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  # Cost Monitoring Alarm
+  HighDailyCostAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-daily-cost-high'
+      AlarmDescription: Alert when daily costs exceed budget
+      MetricName: EstimatedCharges
+      Namespace: AWS/Billing
+      Statistic: Maximum
+      Period: 21600  # 6 hours
+      EvaluationPeriods: 1
+      Threshold: 50  # $50/day threshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Currency
+          Value: USD
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+Outputs:
+  AlertTopicArn:
+    Description: ARN of SNS topic for alerts
+    Value: !Ref AlertTopic
+    Export:
+      Name: !Sub '${Environment}-AlertTopicArn'
+
+  AlertTopicName:
+    Description: Name of SNS topic for alerts
+    Value: !GetAtt AlertTopic.TopicName
+    Export:
+      Name: !Sub '${Environment}-AlertTopicName'
