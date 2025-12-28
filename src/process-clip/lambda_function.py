@@ -3,6 +3,7 @@ Lambda Function 4: Process Individual Clip (MULTI-ASPECT RATIO + SMART FRAMING)
 Extracts clip, converts to multiple aspect ratios (9:16, 16:9, 1:1), and adds KARAOKE subtitles
 SUPPORTS: Vertical (9:16), Horizontal (16:9), Square (1:1)
 NEW: Smart framing with face detection and speaker tracking
+INTEGRATED: With logging, metrics, and S3 sharding
 """
 import json
 import boto3
@@ -10,6 +11,33 @@ import os
 import subprocess
 import time
 from pathlib import Path
+import sys
+
+# Add Lambda Layer path
+sys.path.insert(0, '/opt/python')
+
+# Import scalability utilities (graceful fallback)
+try:
+    from shared.logger import get_logger
+    from shared.metrics import track_clip_processing_time
+    from shared.s3_utils import get_s3_prefix, get_clip_key
+    from shared.firestore_client import add_clip_to_firestore
+    UTILITIES_AVAILABLE = True
+    FIRESTORE_AVAILABLE = True
+    print("[ProcessClip] Scalability utilities loaded successfully")
+except ImportError as e:
+    print(f"[ProcessClip] Warning: Shared utilities not available: {str(e)}")
+    UTILITIES_AVAILABLE = False
+    FIRESTORE_AVAILABLE = False
+    # Fallback for sharding function
+    get_clip_key = lambda user_id, session_id, clip_index, aspect_ratio: f"{session_id}/clips/clip_{clip_index}_{aspect_ratio.replace(':', 'x')}.mp4"
+    add_clip_to_firestore = lambda *args, **kwargs: False
+
+# Initialize logger
+if UTILITIES_AVAILABLE:
+    logger = get_logger('process-clip')
+else:
+    logger = None
 
 # Smart Framing imports (optional - graceful fallback if not available)
 try:
@@ -262,6 +290,7 @@ def lambda_handler(event, context):
         s3_video_key = event['s3_video_key']
         clip = event['clip']
         clip_index = clip['clip_index']
+        user_id = event.get('user_id', 'unknown')  # Get user_id for sharding
 
         # Get template_id from event (default to modern-minimal)
         template_id = event.get('template_id', 'prof-modern-minimal')
@@ -400,14 +429,47 @@ def lambda_handler(event, context):
         print(f"[TIMING] Processing: {process_time:.2f}s (output: {output_size_mb:.2f} MB)")
 
         # Upload to S3 (always use same key - overwrite for reprocessing)
-        s3_clip_key = f"{session_id}/clips/clip_{clip_index}_{aspect_ratio.replace(':', 'x')}.mp4"
-        print(f"[ProcessClip] Uploading to S3: {s3_clip_key}")
+        # Use sharding function for S3 key
+        s3_clip_key = get_clip_key(user_id, session_id, clip_index, aspect_ratio.replace(':', 'x'))
+        print(f"[ProcessClip] Uploading to S3 (with sharding): {s3_clip_key}")
 
         start_upload = time.time()
         s3.upload_file(final_clip_path, BUCKET_NAME, s3_clip_key)
         upload_time = time.time() - start_upload
 
         print(f"[TIMING] Upload: {upload_time:.2f}s")
+
+        # Generate presigned URL for the clip
+        download_url = s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': BUCKET_NAME, 'Key': s3_clip_key},
+            ExpiresIn=259200  # 3 days
+        )
+
+        # Add clip to Firestore immediately (for real-time UI updates)
+        if FIRESTORE_AVAILABLE and user_id:
+            print(f"[ProcessClip] Adding clip {clip_index} to Firestore for real-time updates...")
+            clip_data = {
+                'clip_index': clip_index,
+                'download_url': download_url,
+                's3_key': s3_clip_key,
+                'title': clip.get('title'),
+                'duration': clip.get('duration'),
+                'startTime': clip.get('start'),
+                'endTime': clip.get('end'),
+                'virality_score': clip.get('virality_score'),
+                'score_breakdown': clip.get('score_breakdown'),
+                'template_id': template_id,
+                'template_name': template.get('name', template_id)
+            }
+
+            firestore_success = add_clip_to_firestore(user_id, session_id, clip_data)
+            if firestore_success:
+                print(f"[ProcessClip] ✓ Clip {clip_index} added to Firestore successfully")
+            else:
+                print(f"[ProcessClip] ✗ Failed to add clip {clip_index} to Firestore (will be added by finalize)")
+        else:
+            print(f"[ProcessClip] Skipping Firestore update (not available or no user_id)")
 
         # Clean up temp files
         for path in [local_video_path, final_clip_path]:
@@ -451,6 +513,15 @@ def lambda_handler(event, context):
             result['duration'] = clip['duration']
 
         print(f"[ProcessClip] Preserved metadata - Title: {result.get('title', 'None')}, Virality: {result.get('virality_score', 'None')}")
+
+        # Track metrics
+        if UTILITIES_AVAILABLE:
+            try:
+                track_clip_processing_time(session_id, clip_index, int(total_time * 1000))
+                if logger:
+                    logger.info("Clip processing complete", session_id=session_id, clip_index=clip_index, duration=total_time)
+            except Exception as e:
+                print(f"[ProcessClip] Warning: Metrics tracking failed: {e}")
 
         return result
 

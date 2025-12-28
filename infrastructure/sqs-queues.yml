@@ -1,0 +1,160 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SQS Queues for Video Processing with Dead Letter Queues'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # Main queue for YouTube video processing
+  VideoProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-video-processing-queue'
+      VisibilityTimeout: 900  # 15 minutes (max Lambda duration + buffer)
+      MessageRetentionPeriod: 86400  # 24 hours
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling for cost optimization
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt VideoProcessingDLQ.Arn
+        maxReceiveCount: 3  # After 3 failures, move to DLQ
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: VideoProcessing
+
+  # Dead Letter Queue for failed video processing jobs
+  VideoProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-video-processing-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days (for investigation)
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DeadLetterQueue
+
+  # Main queue for upload video processing
+  UploadProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-upload-processing-queue'
+      VisibilityTimeout: 900  # 15 minutes
+      MessageRetentionPeriod: 86400  # 24 hours
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt UploadProcessingDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: UploadProcessing
+
+  # Dead Letter Queue for failed upload processing jobs
+  UploadProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-upload-processing-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DeadLetterQueue
+
+  # CloudWatch Alarms for Queue Monitoring
+  VideoProcessingQueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-video-queue-depth-high'
+      AlarmDescription: 'Alert when video processing queue depth exceeds threshold'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Average
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt VideoProcessingQueue.QueueName
+      TreatMissingData: notBreaching
+
+  VideoProcessingDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-video-dlq-messages'
+      AlarmDescription: 'Alert when messages appear in DLQ'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 60  # 1 minute
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt VideoProcessingDLQ.QueueName
+      TreatMissingData: notBreaching
+
+  UploadProcessingDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-upload-dlq-messages'
+      AlarmDescription: 'Alert when messages appear in upload DLQ'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 60  # 1 minute
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt UploadProcessingDLQ.QueueName
+      TreatMissingData: notBreaching
+
+Outputs:
+  VideoProcessingQueueUrl:
+    Description: URL of the video processing queue
+    Value: !Ref VideoProcessingQueue
+    Export:
+      Name: !Sub '${Environment}-VideoProcessingQueueUrl'
+
+  VideoProcessingQueueArn:
+    Description: ARN of the video processing queue
+    Value: !GetAtt VideoProcessingQueue.Arn
+    Export:
+      Name: !Sub '${Environment}-VideoProcessingQueueArn'
+
+  VideoProcessingDLQUrl:
+    Description: URL of the video processing DLQ
+    Value: !Ref VideoProcessingDLQ
+    Export:
+      Name: !Sub '${Environment}-VideoProcessingDLQUrl'
+
+  UploadProcessingQueueUrl:
+    Description: URL of the upload processing queue
+    Value: !Ref UploadProcessingQueue
+    Export:
+      Name: !Sub '${Environment}-UploadProcessingQueueUrl'
+
+  UploadProcessingQueueArn:
+    Description: ARN of the upload processing queue
+    Value: !GetAtt UploadProcessingQueue.Arn
+    Export:
+      Name: !Sub '${Environment}-UploadProcessingQueueArn'
+
+  UploadProcessingDLQUrl:
+    Description: URL of the upload processing DLQ
+    Value: !Ref UploadProcessingDLQ
+    Export:
+      Name: !Sub '${Environment}-UploadProcessingDLQUrl'
