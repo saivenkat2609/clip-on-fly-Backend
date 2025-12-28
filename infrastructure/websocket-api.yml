@@ -1,0 +1,217 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'WebSocket API Gateway for Real-Time Video Processing Updates'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  WebSocketHandlerLambdaArn:
+    Type: String
+    Description: ARN of WebSocket handler Lambda function
+
+Resources:
+  # WebSocket API
+  VideoProcessingWebSocketAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${Environment}-video-processing-websocket'
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+      Description: WebSocket API for real-time video processing updates
+      Tags:
+        Environment: !Ref Environment
+        Purpose: RealTimeUpdates
+
+  # Connect Route
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      RouteKey: $connect
+      AuthorizationType: NONE
+      OperationName: ConnectRoute
+      Target: !Sub 'integrations/${ConnectIntegration}'
+
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerLambdaArn}/invocations'
+
+  # Disconnect Route
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      OperationName: DisconnectRoute
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerLambdaArn}/invocations'
+
+  # Subscribe Route
+  SubscribeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      RouteKey: subscribe
+      AuthorizationType: NONE
+      OperationName: SubscribeRoute
+      Target: !Sub 'integrations/${SubscribeIntegration}'
+
+  SubscribeIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerLambdaArn}/invocations'
+
+  # Ping Route (Heartbeat)
+  PingRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      RouteKey: ping
+      AuthorizationType: NONE
+      OperationName: PingRoute
+      Target: !Sub 'integrations/${PingIntegration}'
+
+  PingIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketHandlerLambdaArn}/invocations'
+
+  # Deployment
+  WebSocketDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+      - SubscribeRoute
+      - PingRoute
+    Properties:
+      ApiId: !Ref VideoProcessingWebSocketAPI
+
+  # Stage
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      StageName: !Ref Environment
+      Description: !Sub '${Environment} stage for WebSocket API'
+      DeploymentId: !Ref WebSocketDeployment
+      ApiId: !Ref VideoProcessingWebSocketAPI
+      DefaultRouteSettings:
+        DataTraceEnabled: false
+        LoggingLevel: OFF
+        ThrottlingBurstLimit: 5000
+        ThrottlingRateLimit: 10000
+      Tags:
+        Environment: !Ref Environment
+
+  # Lambda Permissions
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketHandlerLambdaArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${VideoProcessingWebSocketAPI}/*/$connect'
+
+  DisconnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketHandlerLambdaArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${VideoProcessingWebSocketAPI}/*/$disconnect'
+
+  SubscribeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketHandlerLambdaArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${VideoProcessingWebSocketAPI}/*/subscribe'
+
+  PingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketHandlerLambdaArn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${VideoProcessingWebSocketAPI}/*/ping'
+
+  # CloudWatch Alarms
+  WebSocketConnectionCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-websocket-connection-count-high'
+      AlarmDescription: Alert when WebSocket connection count is high
+      MetricName: ConnectionCount
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref VideoProcessingWebSocketAPI
+      TreatMissingData: notBreaching
+
+  WebSocketMessageCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-websocket-message-count-high'
+      AlarmDescription: Alert when WebSocket message count is unusually high
+      MetricName: MessageCount
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 10000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiId
+          Value: !Ref VideoProcessingWebSocketAPI
+      TreatMissingData: notBreaching
+
+Outputs:
+  WebSocketURL:
+    Description: WebSocket API URL
+    Value: !Sub 'wss://${VideoProcessingWebSocketAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${Environment}-WebSocketURL'
+
+  WebSocketAPIId:
+    Description: WebSocket API ID
+    Value: !Ref VideoProcessingWebSocketAPI
+    Export:
+      Name: !Sub '${Environment}-WebSocketAPIId'
+
+  WebSocketStageURL:
+    Description: WebSocket Stage URL
+    Value: !Sub 'wss://${VideoProcessingWebSocketAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${Environment}-WebSocketStageURL'
+
+  WebSocketManagementAPIEndpoint:
+    Description: WebSocket Management API Endpoint (for sending messages)
+    Value: !Sub 'https://${VideoProcessingWebSocketAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${Environment}-WebSocketManagementAPIEndpoint'
