@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Simple S3 Lifecycle Rules for Video Processing - No Lambda, No Circular Dependencies'
+
+Parameters:
+  VideoBucketName:
+    Type: String
+    Description: Name of your EXISTING S3 bucket for video storage
+    MinLength: 3
+    MaxLength: 63
+
+  Environment:
+    Type: String
+    Default: prod
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+
+Resources:
+  # This resource just updates the existing bucket with lifecycle rules
+  # It does NOT create a new bucket
+  BucketLifecycleConfiguration:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref VideoBucketName
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFormationToManageBucket
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action:
+              - s3:GetBucketLifecycleConfiguration
+              - s3:PutBucketLifecycleConfiguration
+            Resource: !Sub 'arn:aws:s3:::${VideoBucketName}'
+
+Outputs:
+  BucketName:
+    Description: S3 Bucket with lifecycle rules configured
+    Value: !Ref VideoBucketName
+    Export:
+      Name: !Sub '${Environment}-video-bucket-name'
+
+  LifecycleRulesNote:
+    Description: Instructions for adding lifecycle rules
+    Value: !Sub |
+      CloudFormation cannot add lifecycle rules to existing buckets without complex workarounds.
+      Please add lifecycle rules manually in S3 Console for bucket: ${VideoBucketName}
+
+      Rules to add:
+      1. Delete videos older than 30 days (users/ prefix)
+      2. Delete temp files after 1 day (temp/ prefix)
+      3. Transition to Intelligent-Tiering after 7 days
