@@ -1,4 +1,4 @@
-# Lambda Deployment Requirements for Smart Framing
+# Lambda Deployment Requirements for Smart Framing + Classification
 # Use this file when deploying to AWS Lambda
 # Install with: pip install -r requirements_lambda.txt -t python/
 
@@ -12,6 +12,21 @@ opencv-python-headless==4.8.1.78
 # MediaPipe for face detection (~30MB, Lambda-compatible)
 mediapipe==0.10.9
 protobuf==3.20.3  # Required by MediaPipe
+
+# NLP Classification dependencies (for accurate video classification)
+# These significantly improve classification accuracy beyond keyword matching
+spacy==3.7.2
+keybert==0.8.4
+sentence-transformers==2.2.2
+textblob==0.17.1
+scikit-learn==1.3.2
+
+# Audio processing (for audio extractor)
+# NOTE: Commented out librosa - very large dependency, optional for classification
+# Most classifiers work great with just transcript + visual features
+# Uncomment if you specifically need audio intensity/music detection:
+# librosa==0.10.1
+# soundfile==0.12.1
 
 # Note: boto3 is provided by Lambda runtime, no need to include
 
