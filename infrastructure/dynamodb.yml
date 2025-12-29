@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'DynamoDB Tables for Video Session Management'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # Main table for video sessions
+  VideoSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-video-sessions'
+      BillingMode: PAY_PER_REQUEST  # Auto-scaling, no capacity planning needed
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: N
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH   # Partition key
+        - AttributeName: session_id
+          KeyType: RANGE  # Sort key
+      GlobalSecondaryIndexes:
+        # Index for querying by status (admin dashboard)
+        - IndexName: status-created_at-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+        # Index for querying user videos by creation date
+        - IndexName: user_id-created_at-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: expires_at  # Auto-delete expired sessions
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES  # Enable streams for real-time processing
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true  # Enable backup
+      SSESpecification:
+        SSEEnabled: true  # Enable encryption at rest
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: VideoSessionManagement
+
+  # Table for WebSocket connections
+  WebSocketConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${Environment}-websocket-connections'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connection_id
+          AttributeType: S
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: connected_at
+          AttributeType: N
+      KeySchema:
+        - AttributeName: connection_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # Index for finding connections by session_id
+        - IndexName: session_id-index
+          KeySchema:
+            - AttributeName: session_id
+              KeyType: HASH
+            - AttributeName: connected_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: expires_at  # Auto-cleanup stale connections (24 hours)
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: WebSocketManagement
+
+  # CloudWatch Alarms for DynamoDB
+  VideoSessionsReadThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-dynamodb-video-sessions-read-throttle'
+      AlarmDescription: Alert when video sessions table read requests are throttled
+      MetricName: UserErrors
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref VideoSessionsTable
+      TreatMissingData: notBreaching
+
+  VideoSessionsWriteThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-dynamodb-video-sessions-write-throttle'
+      AlarmDescription: Alert when video sessions table write requests are throttled
+      MetricName: WriteThrottleEvents
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref VideoSessionsTable
+      TreatMissingData: notBreaching
+
+Outputs:
+  VideoSessionsTableName:
+    Description: Name of video sessions table
+    Value: !Ref VideoSessionsTable
+    Export:
+      Name: !Sub '${Environment}-VideoSessionsTableName'
+
+  VideoSessionsTableArn:
+    Description: ARN of video sessions table
+    Value: !GetAtt VideoSessionsTable.Arn
+    Export:
+      Name: !Sub '${Environment}-VideoSessionsTableArn'
+
+  VideoSessionsTableStreamArn:
+    Description: Stream ARN for video sessions table
+    Value: !GetAtt VideoSessionsTable.StreamArn
+    Export:
+      Name: !Sub '${Environment}-VideoSessionsTableStreamArn'
+
+  WebSocketConnectionsTableName:
+    Description: Name of WebSocket connections table
+    Value: !Ref WebSocketConnectionsTable
+    Export:
+      Name: !Sub '${Environment}-WebSocketConnectionsTableName'
+
+  WebSocketConnectionsTableArn:
+    Description: ARN of WebSocket connections table
+    Value: !GetAtt WebSocketConnectionsTable.Arn
+    Export:
+      Name: !Sub '${Environment}-WebSocketConnectionsTableArn'

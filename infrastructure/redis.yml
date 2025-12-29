@@ -1,0 +1,175 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ElastiCache Redis Cluster for Session State Caching'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID for Redis cluster
+
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for Redis cluster (at least 2)
+
+  LambdaSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID of Lambda functions that will access Redis
+
+Resources:
+  # Redis Subnet Group
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet group for Redis cluster
+      SubnetIds: !Ref PrivateSubnetIds
+      CacheSubnetGroupName: !Sub '${Environment}-redis-subnet-group'
+
+  # Security Group for Redis
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Environment}-redis-sg'
+      GroupDescription: Security group for Redis cluster
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # Allow Lambda functions to access Redis
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref LambdaSecurityGroupId
+          Description: Allow Lambda access to Redis
+      Tags:
+        - Key: Name
+          Value: !Sub '${Environment}-redis-sg'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Redis Replication Group (Primary + Read Replicas)
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupId: !Sub '${Environment}-video-processing-cache'
+      ReplicationGroupDescription: Redis cluster for video processing session state
+      Engine: redis
+      EngineVersion: '7.0'
+      CacheNodeType: cache.t3.micro  # Start small: ~$12/month
+      NumCacheClusters: 2  # 1 primary + 1 replica for HA
+      AutomaticFailoverEnabled: true
+      MultiAZEnabled: true
+      Port: 6379
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      SecurityGroupIds:
+        - !Ref RedisSecurityGroup
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: false  # Disable for Lambda compatibility
+      AutoMinorVersionUpgrade: true
+      SnapshotRetentionLimit: 5
+      SnapshotWindow: '03:00-05:00'  # 3-5 AM UTC
+      PreferredMaintenanceWindow: 'sun:05:00-sun:07:00'  # Sunday 5-7 AM UTC
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: SessionCache
+
+  # CloudWatch Alarms for Redis Monitoring
+  RedisHighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-redis-high-cpu'
+      AlarmDescription: Alert when Redis CPU exceeds 75%
+      MetricName: CPUUtilization
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300  # 5 minutes
+      EvaluationPeriods: 2
+      Threshold: 75
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroup
+      TreatMissingData: notBreaching
+
+  RedisHighMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-redis-high-memory'
+      AlarmDescription: Alert when Redis memory exceeds 80%
+      MetricName: DatabaseMemoryUsagePercentage
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroup
+      TreatMissingData: notBreaching
+
+  RedisConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-redis-connections-high'
+      AlarmDescription: Alert when Redis connections exceed threshold
+      MetricName: CurrConnections
+      Namespace: AWS/ElastiCache
+      Statistic: Average
+      Period: 60  # 1 minute
+      EvaluationPeriods: 3
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroup
+      TreatMissingData: notBreaching
+
+  RedisEvictionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-redis-evictions'
+      AlarmDescription: Alert when Redis starts evicting keys (memory pressure)
+      MetricName: Evictions
+      Namespace: AWS/ElastiCache
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroup
+      TreatMissingData: notBreaching
+
+Outputs:
+  RedisEndpoint:
+    Description: Primary endpoint for Redis cluster
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+    Export:
+      Name: !Sub '${Environment}-RedisEndpoint'
+
+  RedisPort:
+    Description: Port for Redis cluster
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+    Export:
+      Name: !Sub '${Environment}-RedisPort'
+
+  RedisSecurityGroupId:
+    Description: Security group ID for Redis cluster
+    Value: !Ref RedisSecurityGroup
+    Export:
+      Name: !Sub '${Environment}-RedisSecurityGroupId'
+
+  RedisConnectionString:
+    Description: Connection string for Redis (for Lambda environment variables)
+    Value: !Sub '${RedisReplicationGroup.PrimaryEndPoint.Address}:${RedisReplicationGroup.PrimaryEndPoint.Port}'
+    Export:
+      Name: !Sub '${Environment}-RedisConnectionString'

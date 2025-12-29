@@ -42,13 +42,39 @@ os.environ["YTDLP_JSPROP"] = "node"
 os.environ["PATH"] = "/opt/bin:" + os.environ.get("PATH", "")
 
 # os.listdir("/opt/bin")
-# S3 Transfer configuration for faster uploads
+# S3 Transfer configuration for faster uploads with socket timeout
 transfer_config = TransferConfig(
     multipart_threshold=1024 * 25,  # 25 MB
     max_concurrency=10,
     multipart_chunksize=1024 * 25,  # 25 MB
     use_threads=True
 )
+
+# Callback for upload progress
+class ProgressPercentage:
+    def __init__(self, filename):
+        self._filename = filename
+        self._size = float(os.path.getsize(filename))
+        self._seen_so_far = 0
+        self._lock = None
+        try:
+            import threading
+            self._lock = threading.Lock()
+        except:
+            pass
+        self._last_print = 0
+
+    def __call__(self, bytes_amount):
+        if self._lock:
+            with self._lock:
+                self._seen_so_far += bytes_amount
+                percentage = (self._seen_so_far / self._size) * 100
+                # Print every 25%
+                if int(percentage / 25) > self._last_print:
+                    self._last_print = int(percentage / 25)
+                    print(f"[Upload Progress] {percentage:.1f}% ({self._seen_so_far / (1024*1024):.1f}/{self._size / (1024*1024):.1f} MB)")
+        else:
+            self._seen_so_far += bytes_amount
 def lambda_handler(event, context):
    """
    Download YouTube video and upload to S3
@@ -261,16 +287,26 @@ def lambda_handler(event, context):
        print(f"[Download] Downloaded {file_size_mb:.2f} MB")
        # Upload to S3 with multipart for faster transfer
        print(f"[Download] Uploading to S3: {s3_key}")
+       print(f"[Download] File size: {file_size_mb:.2f} MB")
        upload_start = time.time()
-       # Use multipart upload for files > 25MB
-       if file_size > 25 * 1024 * 1024:
-           print("[Download] Using multipart upload (10 concurrent threads)")
-           s3.upload_file(local_path, BUCKET_NAME, s3_key, Config=transfer_config)
-       else:
-           s3.upload_file(local_path, BUCKET_NAME, s3_key)
-       upload_time = time.time() - upload_start
-       upload_speed_mbps = (file_size_mb / upload_time) if upload_time > 0 else 0
-       print(f"[Download] Uploaded in {upload_time:.2f}s ({upload_speed_mbps:.2f} MB/s)")
+
+       try:
+           # Use multipart upload for files > 25MB with progress tracking
+           if file_size > 25 * 1024 * 1024:
+               print("[Download] Using multipart upload (10 concurrent threads)")
+               progress = ProgressPercentage(local_path)
+               s3.upload_file(local_path, BUCKET_NAME, s3_key, Config=transfer_config, Callback=progress)
+           else:
+               s3.upload_file(local_path, BUCKET_NAME, s3_key)
+
+           upload_time = time.time() - upload_start
+           upload_speed_mbps = (file_size_mb / upload_time) if upload_time > 0 else 0
+           print(f"[Download] ✓ Upload complete in {upload_time:.2f}s ({upload_speed_mbps:.2f} MB/s)")
+       except Exception as upload_error:
+           upload_time = time.time() - upload_start
+           print(f"[Download] ✗ Upload failed after {upload_time:.2f}s")
+           print(f"[Download] Error: {str(upload_error)}")
+           raise Exception(f"S3 upload failed: {str(upload_error)}")
        # Clean up local file
        os.remove(local_path)
        total_time = time.time() - start_time

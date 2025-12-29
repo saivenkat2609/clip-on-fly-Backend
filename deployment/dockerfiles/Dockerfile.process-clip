@@ -91,6 +91,17 @@ RUN curl -L --insecure https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-
 # Copy Python packages from builder stage
 COPY --from=builder /build/python-packages ${LAMBDA_TASK_ROOT}
 
+# Copy shared utilities (scalability features)
+# These go in /opt/python to match Lambda Layer path
+RUN mkdir -p /opt/python
+COPY src/shared/ /opt/python/shared/
+
+# Install shared utilities dependencies
+RUN pip install --no-cache-dir \
+    --trusted-host pypi.org \
+    --trusted-host files.pythonhosted.org \
+    redis requests
+
 # Copy Lambda function code
 COPY src/process-clip/lambda_function.py lambda_function.py
 
@@ -105,6 +116,9 @@ COPY src/process-clip/smart_framing/ smart_framing/
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
+
+# Add /opt/python to Python path (so shared utilities can be imported)
+ENV PYTHONPATH="${PYTHONPATH}:/opt/python"
 
 # Lambda handler
 CMD [ "lambda_function.lambda_handler" ]
