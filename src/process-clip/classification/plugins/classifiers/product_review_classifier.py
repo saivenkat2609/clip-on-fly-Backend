@@ -33,11 +33,11 @@ class ProductReviewClassifier(IClassifierPlugin):
             name="Product Review Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies product review and unboxing content",
+            description="Identifies product review and unboxing content using NLP + objects",
             priority=4,
             requires_features=["transcript", "visual"],
             target_category="product_review",
-            tags=["product", "review", "unboxing"]
+            tags=["product", "review", "unboxing", "objects"]
         )
         self._min_confidence = 0.65
 
@@ -53,10 +53,12 @@ class ProductReviewClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
-            visual_features
+            visual_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -71,7 +73,8 @@ class ProductReviewClassifier(IClassifierPlugin):
     def _calculate_confidence(
         self,
         transcript: Dict[str, Any],
-        visual: Dict[str, Any]
+        visual: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for product review classification
@@ -79,6 +82,7 @@ class ProductReviewClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -95,7 +99,7 @@ class ProductReviewClassifier(IClassifierPlugin):
         keyword_score = 0.7 if has_tutorial else 0.3
 
         signals['demonstrative_language'] = keyword_score
-        weights['demonstrative_language'] = 0.30
+        weights['demonstrative_language'] = 0.25
 
         # Signal 2: Speech pattern (continuous explanation)
         speech_pattern = transcript.get('speech_pattern', 'unknown')
@@ -156,6 +160,40 @@ class ProductReviewClassifier(IClassifierPlugin):
 
         signals['composition'] = composition_score
         weights['composition'] = 0.10
+        # Signal: Object Detection (product_review objects - STRONG SIGNAL)
+        has_product_review_objects = objects.get('has_product_review_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_product_review_objects:
+            # Check for specific product_review objects
+            product_review_object_count = 0
+            product_review_objs_list = []
+
+            for obj in ['cell phone', 'laptop', 'mouse', 'keyboard', 'remote', 'book', 'backpack']:
+                if obj in detected_objects:
+                    product_review_object_count += 1
+                    product_review_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if product_review_object_count >= 2:
+                object_score = 1.0
+            el            if product_review_object_count == 1:
+                object_score = 0.9
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        product_review_object_score = category_scores.get('product_review', 0.0)
+        if product_review_object_score > 0.3:
+            object_score = max(object_score, product_review_object_score)
+
+        signals['product_review_objects'] = object_score
+        weights['product_review_objects'] = 0.25
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -173,6 +211,9 @@ class ProductReviewClassifier(IClassifierPlugin):
             'motion_category': motion_category,
             'scene_changes': scene_changes,
             'composition_type': composition_type
+        ,
+            'has_product_review_objects': has_product_review_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
@@ -188,6 +229,16 @@ class ProductReviewClassifier(IClassifierPlugin):
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('product_review_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            product_review_objs = [obj for obj in ['cell phone', 'laptop', 'mouse'] if obj in detected]
+            if product_review_objs:
+                factors.append(f'Product detected: cell phone, lapto{", ".join(product_review_objs)}')
+            else:
+                factors.append('Product Review objects detected in scene')
+
 
         if signals.get('demonstrative_language', 0) >= 0.7:
             factors.append('Demonstrative/explanatory language')

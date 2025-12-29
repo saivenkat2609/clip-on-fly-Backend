@@ -34,11 +34,11 @@ class TutorialClassifier(IClassifierPlugin):
             name="Tutorial Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies tutorial and educational content",
+            description="Identifies tutorial and educational content using NLP + objects",
             priority=2,
             requires_features=["transcript", "visual"],
             target_category="tutorial",
-            tags=["tutorial", "educational", "howto"]
+            tags=["tutorial", "educational", "howto", "objects"]
         )
         self._min_confidence = 0.65
 
@@ -54,10 +54,12 @@ class TutorialClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
-            visual_features
+            visual_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -72,7 +74,8 @@ class TutorialClassifier(IClassifierPlugin):
     def _calculate_confidence(
         self,
         transcript: Dict[str, Any],
-        visual: Dict[str, Any]
+        visual: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for tutorial classification
@@ -80,6 +83,7 @@ class TutorialClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -94,7 +98,7 @@ class TutorialClassifier(IClassifierPlugin):
         keyword_score = 1.0 if has_tutorial else 0.1
 
         signals['tutorial_keywords'] = keyword_score
-        weights['tutorial_keywords'] = 0.40
+        weights['tutorial_keywords'] = 0.35
 
         # Signal 2: Speech pattern (continuous for explanations)
         speech_pattern = transcript.get('speech_pattern', 'unknown')
@@ -135,6 +139,40 @@ class TutorialClassifier(IClassifierPlugin):
 
         signals['motion_level'] = motion_score
         weights['motion_level'] = 0.15
+        # Signal: Object Detection (tutorial objects - STRONG SIGNAL)
+        has_tutorial_objects = objects.get('has_tutorial_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_tutorial_objects:
+            # Check for specific tutorial objects
+            tutorial_object_count = 0
+            tutorial_objs_list = []
+
+            for obj in ['book', 'laptop', 'keyboard', 'mouse', 'tv']:
+                if obj in detected_objects:
+                    tutorial_object_count += 1
+                    tutorial_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if tutorial_object_count >= 2:
+                object_score = 0.9
+            el            if tutorial_object_count == 1:
+                object_score = 0.7
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        tutorial_object_score = category_scores.get('tutorial', 0.0)
+        if tutorial_object_score > 0.3:
+            object_score = max(object_score, tutorial_object_score)
+
+        signals['tutorial_objects'] = object_score
+        weights['tutorial_objects'] = 0.2
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -146,27 +184,41 @@ class TutorialClassifier(IClassifierPlugin):
         # Prepare reasoning
         reasoning = {
             'signals': signals,
-            'key_factors': self._get_key_factors(signals, keywords),
+            'key_factors': self._get_key_factors(signals, keywords, objects),
             'has_tutorial_keywords': has_tutorial,
             'speech_pattern': speech_pattern,
             'speech_density': speech_density,
             'motion_category': motion_category
+        ,
+            'has_tutorial_objects': has_tutorial_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
 
-    def _get_key_factors(self, signals: Dict[str, float], keywords: list) -> list:
+    def _get_key_factors(self, signals: Dict[str, float], keywords: list, objects: Dict[str, Any]) -> list:
         """
         Extract key factors that contributed to classification
 
         Args:
             signals: Signal scores dictionary
             keywords: Detected keywords
+            objects: Object detection features
 
         Returns:
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('tutorial_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            tutorial_objs = [obj for obj in ['book', 'laptop', 'keyboard'] if obj in detected]
+            if tutorial_objs:
+                factors.append(f'Tutorial materials detected: book, lapto{", ".join(tutorial_objs)}')
+            else:
+                factors.append('Tutorial objects detected in scene')
+
 
         if signals.get('tutorial_keywords', 0) >= 0.8:
             factors.append('Strong tutorial/instructional language detected')

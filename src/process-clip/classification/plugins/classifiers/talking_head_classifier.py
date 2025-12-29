@@ -35,11 +35,11 @@ class TalkingHeadClassifier(IClassifierPlugin):
             name="Talking Head Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies person speaking directly to camera",
+            description="Identifies person speaking directly to camera using NLP + objects",
             priority=1,  # High priority - very common format
             requires_features=["transcript", "visual"],
             target_category="talking_head",
-            tags=["face", "speech", "static"]
+            tags=["face", "speech", "static", "objects"]
         )
         self._min_confidence = 0.6
 
@@ -56,11 +56,13 @@ class TalkingHeadClassifier(IClassifierPlugin):
         # Extract relevant features
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
 
         # Calculate confidence score
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
-            visual_features
+            visual_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -75,7 +77,8 @@ class TalkingHeadClassifier(IClassifierPlugin):
     def _calculate_confidence(
         self,
         transcript: Dict[str, Any],
-        visual: Dict[str, Any]
+        visual: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for talking head classification
@@ -83,6 +86,7 @@ class TalkingHeadClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -104,7 +108,7 @@ class TalkingHeadClassifier(IClassifierPlugin):
             face_score = 0.3  # Face present but not centered
 
         signals['face_detection'] = face_score
-        weights['face_detection'] = 0.35
+        weights['face_detection'] = 0.30
 
         # Signal 2: Motion level (should be low/static)
         motion_category = visual.get('motion_category', 'unknown')
@@ -180,6 +184,40 @@ class TalkingHeadClassifier(IClassifierPlugin):
 
         signals['composition'] = composition_score
         weights['composition'] = 0.10
+        # Signal: Object Detection (talking_head objects - STRONG SIGNAL)
+        has_talking_head_objects = objects.get('has_talking_head_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_talking_head_objects:
+            # Check for specific talking_head objects
+            talking_head_object_count = 0
+            talking_head_objs_list = []
+
+            for obj in ['person', 'chair', 'couch', 'potted plant']:
+                if obj in detected_objects:
+                    talking_head_object_count += 1
+                    talking_head_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if talking_head_object_count >= 2:
+                object_score = 0.9
+            el            if talking_head_object_count == 1:
+                object_score = 0.7
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        talking_head_object_score = category_scores.get('talking_head', 0.0)
+        if talking_head_object_score > 0.3:
+            object_score = max(object_score, talking_head_object_score)
+
+        signals['talking_head_objects'] = object_score
+        weights['talking_head_objects'] = 0.2
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -198,6 +236,9 @@ class TalkingHeadClassifier(IClassifierPlugin):
             'motion_category': motion_category,
             'speech_density': speech_density,
             'speech_pattern': speech_pattern
+        ,
+            'has_talking_head_objects': has_talking_head_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
@@ -213,6 +254,16 @@ class TalkingHeadClassifier(IClassifierPlugin):
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('talking_head_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            talking_head_objs = [obj for obj in ['person', 'chair', 'couch'] if obj in detected]
+            if talking_head_objs:
+                factors.append(f'Studio setting detected: chair, couc{", ".join(talking_head_objs)}')
+            else:
+                factors.append('Talking Head objects detected in scene')
+
 
         if signals.get('face_detection', 0) >= 0.7:
             factors.append('Face centered and well-framed')

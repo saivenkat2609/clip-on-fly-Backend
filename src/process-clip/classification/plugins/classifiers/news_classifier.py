@@ -33,11 +33,11 @@ class NewsClassifier(IClassifierPlugin):
             name="News Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies news and journalism content",
+            description="Identifies news and journalism content using NLP + objects",
             priority=6,
             requires_features=["transcript", "visual"],
             target_category="news",
-            tags=["news", "journalism", "reporting"]
+            tags=["news", "journalism", "reporting", "objects"]
         )
         self._min_confidence = 0.65
 
@@ -53,10 +53,12 @@ class NewsClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
-            visual_features
+            visual_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -71,7 +73,8 @@ class NewsClassifier(IClassifierPlugin):
     def _calculate_confidence(
         self,
         transcript: Dict[str, Any],
-        visual: Dict[str, Any]
+        visual: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for news classification
@@ -79,6 +82,7 @@ class NewsClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -93,7 +97,7 @@ class NewsClassifier(IClassifierPlugin):
         keyword_score = 1.0 if has_news else 0.2
 
         signals['news_keywords'] = keyword_score
-        weights['news_keywords'] = 0.40
+        weights['news_keywords'] = 0.35
 
         # Signal 2: Speech pattern (continuous, formal)
         speech_pattern = transcript.get('speech_pattern', 'unknown')
@@ -142,6 +146,40 @@ class NewsClassifier(IClassifierPlugin):
 
         signals['professional_framing'] = composition_score
         weights['professional_framing'] = 0.15
+        # Signal: Object Detection (news objects - STRONG SIGNAL)
+        has_news_objects = objects.get('has_news_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_news_objects:
+            # Check for specific news objects
+            news_object_count = 0
+            news_objs_list = []
+
+            for obj in ['person', 'tv', 'laptop', 'book', 'chair']:
+                if obj in detected_objects:
+                    news_object_count += 1
+                    news_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if news_object_count >= 2:
+                object_score = 0.9
+            el            if news_object_count == 1:
+                object_score = 0.7
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        news_object_score = category_scores.get('news', 0.0)
+        if news_object_score > 0.3:
+            object_score = max(object_score, news_object_score)
+
+        signals['news_objects'] = object_score
+        weights['news_objects'] = 0.2
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -153,28 +191,42 @@ class NewsClassifier(IClassifierPlugin):
         # Prepare reasoning
         reasoning = {
             'signals': signals,
-            'key_factors': self._get_key_factors(signals, keywords),
+            'key_factors': self._get_key_factors(signals, keywords, objects),
             'has_news_keywords': has_news,
             'speech_pattern': speech_pattern,
             'speech_density': speech_density,
             'motion_category': motion_category,
             'composition_type': composition_type
+        ,
+            'has_news_objects': has_news_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
 
-    def _get_key_factors(self, signals: Dict[str, float], keywords: list) -> list:
+    def _get_key_factors(self, signals: Dict[str, float], keywords: list, objects: Dict[str, Any]) -> list:
         """
         Extract key factors that contributed to classification
 
         Args:
             signals: Signal scores dictionary
             keywords: Detected keywords
+            objects: Object detection features
 
         Returns:
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('news_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            news_objs = [obj for obj in ['person', 'tv', 'laptop'] if obj in detected]
+            if news_objs:
+                factors.append(f'News setting detected: tv, chai{", ".join(news_objs)}')
+            else:
+                factors.append('News objects detected in scene')
+
 
         if signals.get('news_keywords', 0) >= 0.8:
             factors.append('News/journalism vocabulary detected')

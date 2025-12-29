@@ -33,11 +33,11 @@ class DanceClassifier(IClassifierPlugin):
             name="Dance Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies dance and choreography content",
+            description="Identifies dance and choreography content using NLP + objects",
             priority=5,
             requires_features=["transcript", "visual", "audio"],
             target_category="dance",
-            tags=["dance", "choreography", "performance"]
+            tags=["dance", "choreography", "performance", "objects"]
         )
         self._min_confidence = 0.70
 
@@ -53,11 +53,13 @@ class DanceClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
         audio_features = features.get('audio', {})
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
             visual_features,
+            object_features,
             audio_features
         )
 
@@ -74,6 +76,7 @@ class DanceClassifier(IClassifierPlugin):
         self,
         transcript: Dict[str, Any],
         visual: Dict[str, Any],
+        objects: Dict[str, Any],
         audio: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
@@ -82,6 +85,7 @@ class DanceClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
             audio: Audio features
 
         Returns:
@@ -103,7 +107,7 @@ class DanceClassifier(IClassifierPlugin):
             music_score = 0.1  # Very unlikely dance without music
 
         signals['music_presence'] = music_score
-        weights['music_presence'] = 0.35
+        weights['music_presence'] = 0.30
 
         # Signal 2: Motion intensity (very high for dance)
         motion_category = visual.get('motion_category', 'unknown')
@@ -155,6 +159,38 @@ class DanceClassifier(IClassifierPlugin):
 
         signals['body_composition'] = composition_score
         weights['body_composition'] = 0.15
+        # Signal: Object Detection (dance objects - STRONG SIGNAL)
+        has_dance_objects = objects.get('has_dance_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_dance_objects:
+            # Check for specific dance objects
+            dance_object_count = 0
+            dance_objs_list = []
+
+            for obj in ['person']:
+                if obj in detected_objects:
+                    dance_object_count += 1
+                    dance_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if dance_object_count == 1:
+                object_score = 0.8
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        dance_object_score = category_scores.get('dance', 0.0)
+        if dance_object_score > 0.3:
+            object_score = max(object_score, dance_object_score)
+
+        signals['dance_objects'] = object_score
+        weights['dance_objects'] = 0.15
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -173,6 +209,9 @@ class DanceClassifier(IClassifierPlugin):
             'motion_intensity': motion_intensity,
             'speech_density': speech_density,
             'composition_type': composition_type
+        ,
+            'has_dance_objects': has_dance_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
@@ -188,6 +227,16 @@ class DanceClassifier(IClassifierPlugin):
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('dance_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            dance_objs = [obj for obj in ['person'] if obj in detected]
+            if dance_objs:
+                factors.append(f'Full body detected in fram{", ".join(dance_objs)}')
+            else:
+                factors.append('Dance objects detected in scene')
+
 
         if signals.get('music_presence', 0) >= 0.8:
             factors.append('Strong music/soundtrack detected')

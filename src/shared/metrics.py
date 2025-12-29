@@ -6,15 +6,36 @@ Provides utilities to publish custom metrics for business and performance monito
 
 import boto3
 import time
+import os
 from datetime import datetime
 from typing import List, Dict, Optional, Union
 
 
-# CloudWatch client
-cloudwatch = boto3.client('cloudwatch')
+# CloudWatch client (lazy initialization for local testing)
+_cloudwatch = None
 
 # Namespace for all metrics
 NAMESPACE = 'VideoProcessing'
+
+
+def _get_cloudwatch_client():
+    """
+    Get CloudWatch client (lazy initialization).
+    Returns None if AWS credentials/region not configured (e.g., local testing).
+    """
+    global _cloudwatch
+    if _cloudwatch is None:
+        try:
+            # Only create client if AWS region is configured
+            if os.environ.get('AWS_REGION') or os.environ.get('AWS_DEFAULT_REGION'):
+                _cloudwatch = boto3.client('cloudwatch')
+            else:
+                print("[Metrics] CloudWatch not available (no AWS region) - metrics disabled for local testing")
+                return None
+        except Exception as e:
+            print(f"[Metrics] CloudWatch client initialization failed: {e}")
+            return None
+    return _cloudwatch
 
 
 def put_metric(
@@ -43,6 +64,11 @@ def put_metric(
             {'Name': 'TemplateId', 'Value': 'modern-minimal'}
         ])
     """
+    cloudwatch = _get_cloudwatch_client()
+    if cloudwatch is None:
+        # CloudWatch not available (local testing) - skip metric publishing
+        return False
+
     try:
         metric_data = {
             'MetricName': metric_name,
@@ -88,6 +114,11 @@ def put_metrics_batch(metrics: List[Dict]) -> bool:
             {'metric_name': 'AvgProcessingTime', 'value': 180, 'unit': 'Seconds'}
         ])
     """
+    cloudwatch = _get_cloudwatch_client()
+    if cloudwatch is None:
+        # CloudWatch not available (local testing) - skip metric publishing
+        return False
+
     try:
         metric_data = []
 

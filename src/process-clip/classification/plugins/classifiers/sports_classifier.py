@@ -33,11 +33,11 @@ class SportsClassifier(IClassifierPlugin):
             name="Sports Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies sports and athletic content",
+            description="Identifies sports and athletic content using NLP + objects",
             priority=5,
             requires_features=["transcript", "visual", "audio"],
             target_category="sports",
-            tags=["sports", "athletics", "action"]
+            tags=["sports", "athletics", "action", "objects"]
         )
         self._min_confidence = 0.65
 
@@ -53,11 +53,13 @@ class SportsClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
         audio_features = features.get('audio', {})
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
             visual_features,
+            object_features,
             audio_features
         )
 
@@ -74,6 +76,7 @@ class SportsClassifier(IClassifierPlugin):
         self,
         transcript: Dict[str, Any],
         visual: Dict[str, Any],
+        objects: Dict[str, Any],
         audio: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
@@ -82,6 +85,7 @@ class SportsClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
             audio: Audio features
 
         Returns:
@@ -107,7 +111,7 @@ class SportsClassifier(IClassifierPlugin):
             motion_score = min(1.0, motion_score + 0.2)
 
         signals['motion_action'] = motion_score
-        weights['motion_action'] = 0.35
+        weights['motion_action'] = 0.30
 
         # Signal 2: Speech pattern (sparse/burst - focus on action)
         speech_pattern = transcript.get('speech_pattern', 'unknown')
@@ -163,6 +167,40 @@ class SportsClassifier(IClassifierPlugin):
 
         signals['has_music'] = music_score
         weights['has_music'] = 0.10
+        # Signal: Object Detection (sports objects - STRONG SIGNAL)
+        has_sports_objects = objects.get('has_sports_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_sports_objects:
+            # Check for specific sports objects
+            sports_object_count = 0
+            sports_objs_list = []
+
+            for obj in ['sports ball', 'bicycle', 'skateboard', 'tennis racket', 'baseball bat', 'frisbee']:
+                if obj in detected_objects:
+                    sports_object_count += 1
+                    sports_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if sports_object_count >= 2:
+                object_score = 1.0
+            el            if sports_object_count == 1:
+                object_score = 0.8
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        sports_object_score = category_scores.get('sports', 0.0)
+        if sports_object_score > 0.3:
+            object_score = max(object_score, sports_object_score)
+
+        signals['sports_objects'] = object_score
+        weights['sports_objects'] = 0.3
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -181,6 +219,9 @@ class SportsClassifier(IClassifierPlugin):
             'speech_density': speech_density,
             'audio_intensity': intensity_category,
             'has_music': has_music
+        ,
+            'has_sports_objects': has_sports_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
@@ -196,6 +237,16 @@ class SportsClassifier(IClassifierPlugin):
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('sports_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            sports_objs = [obj for obj in ['sports ball', 'bicycle', 'skateboard'] if obj in detected]
+            if sports_objs:
+                factors.append(f'Sports equipment detected: ball, racke{", ".join(sports_objs)}')
+            else:
+                factors.append('Sports objects detected in scene')
+
 
         if signals.get('motion_action', 0) >= 0.8:
             factors.append('High-intensity action and movement')

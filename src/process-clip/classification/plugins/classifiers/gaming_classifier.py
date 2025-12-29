@@ -34,11 +34,11 @@ class GamingClassifier(IClassifierPlugin):
             name="Gaming Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies gaming and esports content",
+            description="Identifies gaming and esports content using NLP + objects",
             priority=2,
-            requires_features=["transcript"],  # Can work with transcript only
+            requires_features=["transcript"],  # Can work with transcript only, objects optional
             target_category="gaming",
-            tags=["gaming", "esports", "gameplay"]
+            tags=["gaming", "esports", "gameplay", "objects"]
         )
         self._min_confidence = 0.50  # Lower threshold for transcript-only
 
@@ -55,11 +55,13 @@ class GamingClassifier(IClassifierPlugin):
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual') or {}  # Handle None
         audio_features = features.get('audio') or {}  # Handle None
+        object_features = features.get('objects') or {}  # Handle None - optional
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
             visual_features,
-            audio_features
+            audio_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -75,7 +77,8 @@ class GamingClassifier(IClassifierPlugin):
         self,
         transcript: Dict[str, Any],
         visual: Dict[str, Any],
-        audio: Dict[str, Any]
+        audio: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for gaming classification
@@ -84,6 +87,7 @@ class GamingClassifier(IClassifierPlugin):
             transcript: Transcript features
             visual: Visual features
             audio: Audio features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -170,9 +174,42 @@ class GamingClassifier(IClassifierPlugin):
         }.get(intensity_category, 0.5)
 
         signals['audio_intensity'] = intensity_score
-        weights['audio_intensity'] = 0.15
+        weights['audio_intensity'] = 0.10  # Reduced to make room for object detection
 
-        # Signal 5: Composition (can vary - sometimes face, sometimes not)
+        # Signal 5: Object Detection (gaming equipment - STRONG SIGNAL)
+        has_gaming_objects = objects.get('has_gaming_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default if no objects detected
+
+        if has_gaming_objects:
+            # Check for specific gaming objects
+            gaming_object_count = 0
+            gaming_objects_list = []
+
+            for obj in ['keyboard', 'mouse', 'tv', 'laptop', 'cell phone']:
+                if obj in detected_objects:
+                    gaming_object_count += 1
+                    gaming_objects_list.append(obj)
+
+            # Strong signal if multiple gaming objects detected
+            if gaming_object_count >= 2:
+                object_score = 1.0  # Very confident
+            elif gaming_object_count == 1:
+                object_score = 0.8  # Somewhat confident
+            else:
+                object_score = 0.6  # Weak signal
+
+        # Use object detection category score if available
+        category_scores = objects.get('category_scores', {})
+        gaming_object_score = category_scores.get('gaming', 0.0)
+        if gaming_object_score > 0.3:
+            object_score = max(object_score, gaming_object_score)
+
+        signals['gaming_objects'] = object_score
+        weights['gaming_objects'] = 0.20  # High weight - object detection is reliable
+
+        # Signal 6: Composition (can vary - sometimes face, sometimes not)
         composition_type = visual.get('composition_type', 'unknown')
         has_face = visual.get('has_faces', False)
 
@@ -185,7 +222,7 @@ class GamingClassifier(IClassifierPlugin):
             composition_score = 0.5
 
         signals['composition'] = composition_score
-        weights['composition'] = 0.10
+        weights['composition'] = 0.05  # Reduced to make room for objects
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -197,9 +234,11 @@ class GamingClassifier(IClassifierPlugin):
         # Prepare reasoning
         reasoning = {
             'signals': signals,
-            'key_factors': self._get_key_factors(signals, keywords),
+            'key_factors': self._get_key_factors(signals, keywords, objects),
             'has_gaming_keywords': has_gaming,
             'has_reaction_keywords': has_reaction,
+            'has_gaming_objects': has_gaming_objects,
+            'detected_objects': list(detected_objects.keys())[:5],  # Top 5 objects
             'speech_pattern': speech_pattern,
             'motion_category': motion_category,
             'scene_changes': scene_changes,
@@ -208,18 +247,28 @@ class GamingClassifier(IClassifierPlugin):
 
         return confidence, reasoning
 
-    def _get_key_factors(self, signals: Dict[str, float], keywords: list) -> list:
+    def _get_key_factors(self, signals: Dict[str, float], keywords: list, objects: Dict[str, Any]) -> list:
         """
         Extract key factors that contributed to classification
 
         Args:
             signals: Signal scores dictionary
             keywords: Detected keywords
+            objects: Object detection features
 
         Returns:
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is the strongest signal
+        if signals.get('gaming_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            gaming_objs = [obj for obj in ['keyboard', 'mouse', 'tv', 'laptop'] if obj in detected]
+            if gaming_objs:
+                factors.append(f'Gaming equipment detected: {", ".join(gaming_objs)}')
+            else:
+                factors.append('Gaming-related objects detected in scene')
 
         if signals.get('gaming_keywords', 0) >= 0.8:
             factors.append('Strong gaming vocabulary detected')

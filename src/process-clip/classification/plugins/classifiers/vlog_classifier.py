@@ -33,11 +33,11 @@ class VlogClassifier(IClassifierPlugin):
             name="Vlog Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies vlog and lifestyle content",
+            description="Identifies vlog and lifestyle content using NLP + objects",
             priority=4,
             requires_features=["transcript", "visual"],
             target_category="vlog",
-            tags=["vlog", "lifestyle", "personal"]
+            tags=["vlog", "lifestyle", "personal", "objects"]
         )
         self._min_confidence = 0.60
 
@@ -53,10 +53,12 @@ class VlogClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get(\'objects\') or {}
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
-            visual_features
+            visual_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -71,7 +73,8 @@ class VlogClassifier(IClassifierPlugin):
     def _calculate_confidence(
         self,
         transcript: Dict[str, Any],
-        visual: Dict[str, Any]
+        visual: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for vlog classification
@@ -79,6 +82,7 @@ class VlogClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -93,7 +97,7 @@ class VlogClassifier(IClassifierPlugin):
         keyword_score = 1.0 if has_vlog else 0.2
 
         signals['vlog_keywords'] = keyword_score
-        weights['vlog_keywords'] = 0.35
+        weights['vlog_keywords'] = 0.30
 
         # Signal 2: Speech pattern (casual, continuous with pauses)
         speech_pattern = transcript.get('speech_pattern', 'unknown')
@@ -154,6 +158,42 @@ class VlogClassifier(IClassifierPlugin):
 
         signals['composition'] = composition_score
         weights['composition'] = 0.15
+        # Signal: Object Detection (vlog objects - STRONG SIGNAL)
+        has_vlog_objects = objects.get('has_vlog_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_vlog_objects:
+            # Check for specific vlog objects
+            vlog_object_count = 0
+            vlog_objs_list = []
+
+            for obj in ['person', 'car', 'bicycle', 'backpack', 'cell phone']:
+                if obj in detected_objects:
+                    vlog_object_count += 1
+                    vlog_objs_list.append(obj)
+
+            # Strong signal if multiple objects detected
+            if vlog_object_count >= 3:
+                object_score = 0.8
+            el            if vlog_object_count >= 2:
+                object_score = 0.7
+            el            if vlog_object_count == 1:
+                object_score = 0.6
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        vlog_object_score = category_scores.get('vlog', 0.0)
+        if vlog_object_score > 0.3:
+            object_score = max(object_score, vlog_object_score)
+
+        signals['vlog_objects'] = object_score
+        weights['vlog_objects'] = 0.15
+
+
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -165,28 +205,42 @@ class VlogClassifier(IClassifierPlugin):
         # Prepare reasoning
         reasoning = {
             'signals': signals,
-            'key_factors': self._get_key_factors(signals, keywords),
+            'key_factors': self._get_key_factors(signals, keywords, objects),
             'has_vlog_keywords': has_vlog,
             'speech_pattern': speech_pattern,
             'speech_density': speech_density,
             'motion_category': motion_category,
             'scene_changes': scene_changes
+        ,
+            'has_vlog_objects': has_vlog_objects,
+            'detected_objects': list(detected_objects.keys())[:5]
         }
 
         return confidence, reasoning
 
-    def _get_key_factors(self, signals: Dict[str, float], keywords: list) -> list:
+    def _get_key_factors(self, signals: Dict[str, float], keywords: list, objects: Dict[str, Any]) -> list:
         """
         Extract key factors that contributed to classification
 
         Args:
             signals: Signal scores dictionary
             keywords: Detected keywords
+            objects: Object detection features
 
         Returns:
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('vlog_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            vlog_objs = [obj for obj in ['person', 'car', 'bicycle'] if obj in detected]
+            if vlog_objs:
+                factors.append(f'Lifestyle objects detected: car, backpac{", ".join(vlog_objs)}')
+            else:
+                factors.append('Vlog objects detected in scene')
+
 
         if signals.get('vlog_keywords', 0) >= 0.8:
             factors.append('Strong vlog vocabulary detected')

@@ -17,3 +17,10 @@ scikit-learn==1.3.2  # Required by librosa, must be compatible with numpy 1.x
 soundfile==0.12.1
 audioread==3.0.1
 numba==0.57.1  # Required by librosa, compatible with numpy 1.x
+
+# Object detection (YOLOv8n ONNX + dependencies)
+# ONNX Runtime for fast inference without PyTorch
+onnxruntime==1.16.3  # Lightweight CPU inference engine (~20MB)
+ultralytics==8.0.196  # For exporting YOLOv8n to ONNX format (build-time only)
+onnx==1.15.0  # Required for ONNX export
+onnxsim==0.4.35  # Required for ONNX model simplification

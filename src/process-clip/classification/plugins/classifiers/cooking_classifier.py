@@ -33,11 +33,11 @@ class CookingClassifier(IClassifierPlugin):
             name="Cooking Classifier",
             version="1.0.0",
             author="OpusClip Team",
-            description="Identifies cooking and recipe videos",
+            description="Identifies cooking and recipe videos using NLP + objects",
             priority=3,
             requires_features=["transcript", "visual"],
             target_category="cooking",
-            tags=["cooking", "recipe", "tutorial"]
+            tags=["cooking", "recipe", "tutorial", "objects"]
         )
         self._min_confidence = 0.65
 
@@ -53,10 +53,12 @@ class CookingClassifier(IClassifierPlugin):
         """
         transcript_features = features.get('transcript', {})
         visual_features = features.get('visual', {})
+        object_features = features.get('objects') or {}
 
         confidence, reasoning = self._calculate_confidence(
             transcript_features,
-            visual_features
+            visual_features,
+            object_features
         )
 
         if confidence < self._min_confidence:
@@ -71,7 +73,8 @@ class CookingClassifier(IClassifierPlugin):
     def _calculate_confidence(
         self,
         transcript: Dict[str, Any],
-        visual: Dict[str, Any]
+        visual: Dict[str, Any],
+        objects: Dict[str, Any]
     ) -> tuple[float, Dict[str, Any]]:
         """
         Calculate confidence score for cooking classification
@@ -79,6 +82,7 @@ class CookingClassifier(IClassifierPlugin):
         Args:
             transcript: Transcript features
             visual: Visual features
+            objects: Object detection features (optional)
 
         Returns:
             Tuple of (confidence_score, reasoning_dict)
@@ -98,7 +102,7 @@ class CookingClassifier(IClassifierPlugin):
             keyword_score = 0.4  # Could be cooking tutorial
 
         signals['cooking_keywords'] = keyword_score
-        weights['cooking_keywords'] = 0.40
+        weights['cooking_keywords'] = 0.30  # Reduced for objects
 
         # Signal 2: Instructional language
         speech_pattern = transcript.get('speech_pattern', 'unknown')
@@ -137,7 +141,42 @@ class CookingClassifier(IClassifierPlugin):
         }.get(composition_type, 0.5)
 
         signals['composition'] = composition_score
-        weights['composition'] = 0.20
+        weights['composition'] = 0.10  # Reduced for objects
+
+        # Signal 5: Object Detection (cooking utensils - STRONG SIGNAL)
+        has_cooking_objects = objects.get('has_cooking_objects', False)
+        detected_objects = objects.get('detected_objects', {})
+
+        object_score = 0.5  # Default
+
+        if has_cooking_objects:
+            # Check for specific cooking objects
+            cooking_object_count = 0
+            cooking_objs_list = []
+
+            for obj in ['bowl', 'knife', 'spoon', 'fork', 'cup', 'oven', 'sink', 'dining table']:
+                if obj in detected_objects:
+                    cooking_object_count += 1
+                    cooking_objs_list.append(obj)
+
+            # Strong signal if multiple cooking objects detected
+            if cooking_object_count >= 3:
+                object_score = 1.0  # Very confident
+            elif cooking_object_count >= 2:
+                object_score = 0.9
+            elif cooking_object_count == 1:
+                object_score = 0.7
+            else:
+                object_score = 0.6
+
+        # Use object detection category score
+        category_scores = objects.get('category_scores', {})
+        cooking_object_score = category_scores.get('cooking', 0.0)
+        if cooking_object_score > 0.3:
+            object_score = max(object_score, cooking_object_score)
+
+        signals['cooking_objects'] = object_score
+        weights['cooking_objects'] = 0.25  # High weight
 
         # Calculate weighted confidence
         total_weight = sum(weights.values())
@@ -149,27 +188,39 @@ class CookingClassifier(IClassifierPlugin):
         # Prepare reasoning
         reasoning = {
             'signals': signals,
-            'key_factors': self._get_key_factors(signals, keywords),
+            'key_factors': self._get_key_factors(signals, keywords, objects),
             'has_cooking_keywords': has_cooking,
             'has_tutorial_keywords': has_tutorial,
+            'has_cooking_objects': has_cooking_objects,
+            'detected_objects': list(detected_objects.keys())[:5],
             'motion_category': motion_category,
             'speech_pattern': speech_pattern
         }
 
         return confidence, reasoning
 
-    def _get_key_factors(self, signals: Dict[str, float], keywords: list) -> list:
+    def _get_key_factors(self, signals: Dict[str, float], keywords: list, objects: Dict[str, Any]) -> list:
         """
         Extract key factors that contributed to classification
 
         Args:
             signals: Signal scores dictionary
             keywords: Detected keywords
+            objects: Object detection features
 
         Returns:
             List of key factor descriptions
         """
         factors = []
+
+        # Object detection is strongest signal
+        if signals.get('cooking_objects', 0) >= 0.8:
+            detected = objects.get('detected_objects', {})
+            cooking_objs = [obj for obj in ['bowl', 'knife', 'spoon', 'oven', 'sink'] if obj in detected]
+            if cooking_objs:
+                factors.append(f'Cooking equipment detected: {", ".join(cooking_objs)}')
+            else:
+                factors.append('Kitchen objects detected in scene')
 
         if signals.get('cooking_keywords', 0) >= 0.8:
             factors.append('Strong cooking-related vocabulary detected')

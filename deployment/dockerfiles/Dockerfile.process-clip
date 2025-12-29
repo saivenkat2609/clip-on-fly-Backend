@@ -111,6 +111,14 @@ COPY src/process-clip/classification_integration.py classification_integration.p
 # Copy classification system (all plugins)
 COPY src/process-clip/classification/ classification/
 
+# Download YOLOv8n model and export to ONNX format
+# This runs during build time to prepare the model for Lambda
+# NOTE: Using --insecure due to SSL certificate issues in build environment
+# NOTE: TORCH_FORCE_WEIGHTS_ONLY_LOAD=0 allows loading official ultralytics models (PyTorch 2.6+ security)
+RUN curl -L --insecure https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt -o /tmp/yolov8n.pt && \
+    PYTHONPATH=/var/task:$PYTHONPATH TORCH_FORCE_WEIGHTS_ONLY_LOAD=0 python classification/download_yolov8n_model.py && \
+    echo "[Build] YOLOv8n model downloaded and exported to ONNX"
+
 # Copy smart_framing module
 COPY src/process-clip/smart_framing/ smart_framing/
 
