@@ -186,7 +186,7 @@ Respond ONLY with valid JSON array (no markdown, no extra text):
     }
 
     request_data = {
-        "model": "llama-3.1-70b-versatile",  # Using stable model
+        "model": "llama-3.3-70b-versatile",  # Updated to newer Llama 3.3 model
         "messages": [
             {
                 "role": "system",
@@ -481,7 +481,7 @@ Respond with ONLY the title text, no quotes, no extra text:"""
         }
 
         request_data = {
-            "model": "llama-3.1-70b-versatile",  # Using stable model
+            "model": "llama-3.3-70b-versatile",  # Updated to newer Llama 3.3 model
             "messages": [
                 {
                     "role": "system",
