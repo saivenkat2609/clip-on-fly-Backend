@@ -10,5 +10,14 @@ opencv-python==4.8.1.78
 numpy==1.24.3
 scipy==1.11.4
 
+# NLP Classification dependencies (for accurate video classification)
+# These enable semantic understanding of transcript content
+spacy==3.7.2
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+keybert==0.8.4
+sentence-transformers==2.2.2
+textblob==0.17.1
+scikit-learn==1.3.2
+
 # Note: For Lambda deployment, use opencv-python-headless instead of opencv-python
 # For local testing, opencv-python is recommended (includes GUI support for debugging)

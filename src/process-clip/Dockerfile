@@ -19,11 +19,19 @@ COPY requirements_lambda.txt ${LAMBDA_TASK_ROOT}/
 # Disable SSL verification due to certificate issues
 RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -r ${LAMBDA_TASK_ROOT}/requirements_lambda.txt
 
+# Download spaCy language model
+# This downloads the small English model (~12MB) for NLP classification
+RUN python -m spacy download en_core_web_sm --no-cache-dir
+
 # Copy function code
 COPY lambda_function.py ${LAMBDA_TASK_ROOT}/
+COPY classification_integration.py ${LAMBDA_TASK_ROOT}/
 
 # Copy smart_framing module
 COPY smart_framing/ ${LAMBDA_TASK_ROOT}/smart_framing/
+
+# Copy classification system (plugin-based architecture)
+COPY classification/ ${LAMBDA_TASK_ROOT}/classification/
 
 # Set the CMD to your handler
 CMD [ "lambda_function.lambda_handler" ]

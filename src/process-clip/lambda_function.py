@@ -55,6 +55,18 @@ except ImportError as e:
     SMART_FRAMING_AVAILABLE = False
     print(f"[SmartFraming] Smart framing not available: {e}")
 
+# Classification imports (optional - graceful fallback if not available)
+try:
+    from classification_integration import (
+        initialize_classification,
+        classify_and_configure_processing
+    )
+    CLASSIFICATION_AVAILABLE = True
+    print("[Classification] Classification module loaded successfully")
+except ImportError as e:
+    CLASSIFICATION_AVAILABLE = False
+    print(f"[Classification] Classification not available: {e}")
+
 def get_storage_client():
     """Get S3-compatible storage client"""
     endpoint = os.environ.get('R2_ENDPOINT') or os.environ.get('STORAGE_ENDPOINT')
@@ -110,6 +122,16 @@ ASPECT_RATIOS = {
 
 # Template cache (loaded once per Lambda warm start)
 _TEMPLATE_CACHE = None
+
+# Classification service (initialized once per Lambda warm start)
+_classification_service = None
+if CLASSIFICATION_AVAILABLE:
+    print("[Classification] Initializing classification service at module level...")
+    _classification_service = initialize_classification()
+    if _classification_service:
+        print("[Classification] Service ready for warm starts")
+    else:
+        print("[Classification] Service initialization failed, will use defaults")
 
 def load_templates():
     """Load template configurations from JSON file or S3"""
@@ -333,6 +355,29 @@ def lambda_handler(event, context):
         # Detect actual video dimensions
         video_width, video_height = get_video_dimensions(local_video_path)
 
+        # Classify video and get processing configuration
+        processing_config = None
+        if CLASSIFICATION_AVAILABLE and _classification_service:
+            print(f"[Classification] Classifying clip with full analysis (NLP + Audio + Visual)...")
+            processing_config = classify_and_configure_processing(
+                service=_classification_service,
+                clip_info=clip,
+                video_path=local_video_path,  # Pass video path for full analysis
+                use_quick_mode=False  # Full analysis mode (NLP + Audio + Visual in parallel)
+            )
+
+            # Log classification results
+            if processing_config and processing_config.get('classified'):
+                print(f"[Classification] ✓ Detected: {processing_config['category']}")
+                print(f"[Classification]   Confidence: {processing_config['confidence']:.2f}")
+                print(f"[Classification]   Smart framing: {processing_config['use_smart_framing']}")
+                print(f"[Classification]   Subtitle mode: {processing_config['subtitle_mode']}")
+                print(f"[Classification]   Primary ratio: {processing_config['primary_ratio']}")
+            else:
+                print(f"[Classification] No classification detected, using defaults")
+        else:
+            print(f"[Classification] Service not available, using defaults")
+
         # Final output path
         final_clip_path = f"/tmp/clip_{clip_index}.mp4"
 
@@ -342,10 +387,25 @@ def lambda_handler(event, context):
         # Check if caller explicitly wants to skip smart framing (e.g., reprocessing)
         skip_smart_framing = event.get('skip_smart_framing', False)
 
+        # Apply classification recommendations (if available)
+        smart_framing_recommended = False
+        subtitle_mode_override = None
+
+        if processing_config and processing_config.get('classified'):
+            # Classification provides recommendations
+            smart_framing_recommended = processing_config.get('use_smart_framing', False)
+            subtitle_mode_override = processing_config.get('subtitle_mode', 'karaoke')
+
+            # Override aspect ratio if classification suggests different primary ratio
+            classification_ratio = processing_config.get('primary_ratio')
+            if classification_ratio and classification_ratio != aspect_ratio:
+                print(f"[Classification] Overriding aspect ratio: {aspect_ratio} -> {classification_ratio}")
+                aspect_ratio = classification_ratio
+
         # Check if smart framing is enabled and available
         use_smart_framing = (
             not skip_smart_framing and  # Don't use if explicitly skipped
-            ENABLE_SMART_FRAMING and
+            (smart_framing_recommended or ENABLE_SMART_FRAMING) and  # Recommended by classifier OR enabled globally
             SMART_FRAMING_AVAILABLE and
             clip.get('segments')  # Need transcript for speaker tracking
         )
@@ -385,8 +445,28 @@ def lambda_handler(event, context):
             print(f"[ProcessClip] ADD_SUBTITLES = {ADD_SUBTITLES}")
             print(f"[ProcessClip] Segments present = {bool(clip.get('segments'))}")
             print(f"[ProcessClip] Word-level timestamps = {has_word_timestamps}")
-            if ADD_SUBTITLES and clip.get('segments'):
-                if has_word_timestamps:
+            print(f"[ProcessClip] Subtitle mode override = {subtitle_mode_override}")
+
+            # Determine subtitle processing based on classification recommendation
+            effective_subtitle_mode = subtitle_mode_override if subtitle_mode_override else (
+                'karaoke' if has_word_timestamps else 'simple'
+            )
+
+            # Apply classification recommendations
+            if subtitle_mode_override == 'none':
+                # Classification recommends no subtitles (e.g., dance videos)
+                print(f"[ProcessClip] Skipping subtitles (recommended by classifier for {processing_config.get('category', 'unknown')})")
+                extract_clip_no_subs(
+                    local_video_path,
+                    clip['start'],
+                    clip['end'],
+                    final_clip_path,
+                    aspect_ratio,
+                    video_width,
+                    video_height
+                )
+            elif ADD_SUBTITLES and clip.get('segments'):
+                if effective_subtitle_mode == 'karaoke' and has_word_timestamps:
                     print(f"[ProcessClip] Processing with KARAOKE subtitles (word-by-word)...")
                     process_clip_with_karaoke_subtitles(
                         local_video_path,
@@ -512,6 +592,15 @@ def lambda_handler(event, context):
                 'total': total_time
             }
         }
+
+        # Add classification metadata if available
+        if processing_config and processing_config.get('classified'):
+            result['classification'] = {
+                'category': processing_config.get('category'),
+                'confidence': processing_config.get('confidence'),
+                'smart_framing_used': use_smart_framing,
+                'subtitle_mode_used': effective_subtitle_mode if 'effective_subtitle_mode' in locals() else 'unknown'
+            }
 
         # Preserve title, virality score, and other metadata from original clip
         if 'title' in clip:
