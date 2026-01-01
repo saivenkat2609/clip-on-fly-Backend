@@ -1,7 +1,7 @@
-# NO DEPENDENCIES NEEDED!
-# This lambda only uses:
-# - boto3 (built-in to Lambda)
+# HIGH PRIORITY FIX #9: Firebase Admin SDK for secure backend authentication
+firebase-admin==6.5.0
+
+# Built-in to Lambda:
+# - boto3 (AWS SDK)
 # - urllib (Python standard library)
 # - json, os (Python standard library)
-
-# Empty requirements - nothing to install

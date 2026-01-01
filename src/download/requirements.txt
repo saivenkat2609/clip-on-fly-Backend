@@ -5,5 +5,9 @@
 # This reduces deployment package size significantly
 yt-dlp>=2024.11.18
 
+# HIGH PRIORITY FIX #19: Retry logic with exponential backoff
+# Handles transient YouTube download failures
+tenacity==8.2.3
+
 # Note: boto3 is already available in Lambda runtime - don't package it!
 # Note: Requires Node.js and FFmpeg as Lambda layers

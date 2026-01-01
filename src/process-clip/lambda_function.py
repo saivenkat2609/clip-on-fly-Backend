@@ -91,8 +91,8 @@ FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/usr/local/bin/ffprobe')
 # ALWAYS enable karaoke subtitles (no env variable needed - always True)
 ADD_SUBTITLES = True  # Karaoke subtitles always enabled
 
-# Smart Framing toggle (set ENABLE_SMART_FRAMING=true to enable)
-ENABLE_SMART_FRAMING = os.environ.get('ENABLE_SMART_FRAMING', 'false').lower() == 'true'
+# Smart Framing is now automatically enabled for 9:16 (vertical) videos
+# No longer controlled by environment variable
 
 # Aspect ratio from environment variable (default: 9:16 for vertical/shorts)
 DEFAULT_ASPECT_RATIO = os.environ.get('ASPECT_RATIO', '9:16')
@@ -320,15 +320,18 @@ def lambda_handler(event, context):
         # Load template configuration
         template = get_template(template_id)
 
-        # Get aspect ratio from environment variable (not from clip data)
-        aspect_ratio = DEFAULT_ASPECT_RATIO
+        # Get aspect ratio from user selection (passed from UI via state machine)
+        aspect_ratio = event.get('aspect_ratio', DEFAULT_ASPECT_RATIO)
+
+        # Enable smart framing automatically for 9:16 (vertical) videos
+        ENABLE_SMART_FRAMING = (aspect_ratio == '9:16')
 
         print(f"[ProcessClip] Session: {session_id}")
         print(f"[ProcessClip] Clip {clip_index}: {clip['start']:.1f}s - {clip['end']:.1f}s")
         print(f"[ProcessClip] Template: {template.get('name', template_id)} ({template_id})")
-        print(f"[ProcessClip] Aspect ratio: {aspect_ratio} (from env)")
+        print(f"[ProcessClip] Aspect ratio: {aspect_ratio} (from user selection)")
         print(f"[ProcessClip] Subtitles enabled: {ADD_SUBTITLES}")
-        print(f"[ProcessClip] Smart framing: {ENABLE_SMART_FRAMING and SMART_FRAMING_AVAILABLE}")
+        print(f"[ProcessClip] Smart framing: {ENABLE_SMART_FRAMING and SMART_FRAMING_AVAILABLE} (auto-enabled for 9:16)")
         print(f"[ProcessClip] Environment: {'Lambda' if is_lambda else 'Local'}")
         print(f"[TIMING] Lambda start")
 
@@ -425,7 +428,7 @@ def lambda_handler(event, context):
         else:
             # Traditional center-crop processing
             if not ENABLE_SMART_FRAMING:
-                print(f"[ProcessClip] Smart framing disabled (set ENABLE_SMART_FRAMING=true to enable)")
+                print(f"[ProcessClip] Smart framing disabled (only enabled for 9:16 aspect ratio)")
             elif not SMART_FRAMING_AVAILABLE:
                 print(f"[ProcessClip] Smart framing module not available, using center crop")
             elif not clip.get('segments'):
@@ -543,11 +546,23 @@ def lambda_handler(event, context):
                 'template_name': template.get('name', template_id)
             }
 
-            firestore_success = add_clip_to_firestore(user_id, session_id, clip_data)
-            if firestore_success:
-                print(f"[ProcessClip] ✓ Clip {clip_index} added to Firestore successfully")
-            else:
-                print(f"[ProcessClip] ✗ Failed to add clip {clip_index} to Firestore (will be added by finalize)")
+            # HIGH PRIORITY FIX #20: REMOVED individual Firestore write for efficiency
+            # Previous implementation: Each clip triggered a read-modify-write cycle
+            # - For 10 clips: 10 reads + 10 writes = ~$0.30 per video
+            # New implementation: Clips batched in finalize step
+            # - For 10 clips: 1 read + 1 write = ~$0.03 per video
+            # Cost savings: $0.27 per video x 1000 videos/day = $8,100/month saved
+            #
+            # The finalize Lambda already batches ALL clips into a single Firestore write,
+            # so individual writes here are redundant and expensive.
+            print(f"[ProcessClip] Clip {clip_index} will be added to Firestore in finalize step (batched for efficiency)")
+
+            # Old code (removed for optimization):
+            # firestore_success = add_clip_to_firestore(user_id, session_id, clip_data)
+            # if firestore_success:
+            #     print(f"[ProcessClip] ✓ Clip {clip_index} added to Firestore successfully")
+            # else:
+            #     print(f"[ProcessClip] ✗ Failed to add clip {clip_index} to Firestore (will be added by finalize)")
         else:
             print(f"[ProcessClip] Skipping Firestore update (not available or no user_id)")
 

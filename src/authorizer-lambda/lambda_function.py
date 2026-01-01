@@ -8,13 +8,18 @@ This authorizer runs before every API request and ensures that:
 3. The token hasn't expired
 4. The user context is passed to downstream Lambda functions
 
-Security: Caches Firebase public keys for 1 hour to improve performance
+Security: Caches Firebase public keys for 15 minutes to improve performance
+
+HIGH PRIORITY FIX #16: Replaced requests library with urllib to reduce package size
+- requests (~500KB) replaced with urllib (built-in, 0KB)
+- Reduces Lambda package size and cold start time
 """
 
 import json
 import os
 import jwt
-import requests
+import urllib.request
+import urllib.error
 from datetime import datetime, timedelta
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -44,13 +49,14 @@ def get_firebase_public_keys():
 
     try:
         print('[Authorizer] Fetching fresh Firebase public keys')
-        response = requests.get(FIREBASE_KEYS_URL, timeout=5)
-        response.raise_for_status()
-        keys = response.json()
+        # HIGH PRIORITY FIX #16: Use urllib instead of requests (built-in, reduces package size)
+        req = urllib.request.Request(FIREBASE_KEYS_URL, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            keys = json.loads(response.read().decode('utf-8'))
 
-        # Cache keys for 1 hour
+        # SECURITY FIX: Cache keys for 15 minutes (reduced from 1 hour for faster key rotation)
         _keys_cache['keys'] = keys
-        _keys_cache['expires'] = now + timedelta(hours=1)
+        _keys_cache['expires'] = now + timedelta(minutes=15)
 
         return keys
     except Exception as e:
@@ -76,6 +82,11 @@ def verify_firebase_token(token):
         Exception: If token is invalid, expired, or verification fails
     """
     try:
+        # SECURITY FIX: Validate token format (should be 3 parts: header.payload.signature)
+        token_parts = token.split('.')
+        if len(token_parts) != 3:
+            raise Exception('Invalid token format - must have 3 parts')
+
         # Decode header to get key ID (kid)
         header = jwt.get_unverified_header(token)
         kid = header.get('kid')
@@ -87,7 +98,7 @@ def verify_firebase_token(token):
         public_keys = get_firebase_public_keys()
 
         if kid not in public_keys:
-            raise Exception(f'Invalid key ID: {kid}')
+            raise Exception(f'Invalid key ID - key not found in Firebase keys')
 
         # Load the X.509 certificate and extract public key
         cert_str = public_keys[kid]
@@ -102,6 +113,24 @@ def verify_firebase_token(token):
             audience=FIREBASE_PROJECT_ID,
             issuer=f'https://securetoken.google.com/{FIREBASE_PROJECT_ID}'
         )
+
+        # SECURITY FIX: Validate additional time-based claims
+        import time
+        current_time = int(time.time())
+
+        # Validate 'nbf' (not before) if present
+        if 'nbf' in decoded:
+            nbf = decoded['nbf']
+            if nbf > current_time:
+                raise Exception('Token not yet valid (nbf claim)')
+
+        # SECURITY FIX: Validate 'iat' (issued at) to prevent tokens from future
+        if 'iat' in decoded:
+            iat = decoded['iat']
+            # Allow 5 minutes clock skew
+            max_iat = current_time + 300
+            if iat > max_iat:
+                raise Exception('Token issued in future (iat claim invalid)')
 
         # Validate required claims
         # Firebase tokens use 'sub' (standard JWT) as the user ID
