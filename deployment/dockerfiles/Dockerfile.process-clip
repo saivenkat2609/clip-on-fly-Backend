@@ -1,15 +1,66 @@
 # Dockerfile for opus-process-clip Lambda Function (ECR Deployment)
 # This creates a container image for the video processing Lambda function
+# Uses multi-stage build to optimize final image size
 # Uses AWS Lambda Python 3.11 base image for compatibility
 
+# ============================================================================
+# STAGE 1: Builder - Install dependencies and build packages
+# ============================================================================
+FROM public.ecr.aws/lambda/python:3.11 AS builder
+
+WORKDIR /build
+
+# Install build dependencies (gcc needed for some Python packages)
+# NOTE: SSL verification disabled due to certificate issues in build environment
+RUN echo "sslverify=0" >> /etc/yum.conf && \
+    yum update -y && \
+    yum install -y \
+        gcc \
+        gcc-c++ \
+        tar \
+        xz && \
+    yum clean all && \
+    rm -rf /var/cache/yum
+
+# Copy requirements files (split for better caching)
+COPY src/process-clip/requirements_base.txt requirements_base.txt
+COPY src/process-clip/requirements_heavy.txt requirements_heavy.txt
+
+# Install base dependencies first (cached separately for faster rebuilds)
+# NOTE: SSL verification disabled due to certificate issues in build environment
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --upgrade pip && \
+    pip install \
+        --trusted-host pypi.org \
+        --trusted-host files.pythonhosted.org \
+        --timeout 600 \
+        --default-timeout 600 \
+        --target /build/python-packages \
+        -r requirements_base.txt
+
+# Install heavy ML dependencies (only MediaPipe for visual features)
+# NOTE: SSL verification disabled due to certificate issues in build environment
+# Use --upgrade-strategy=only-if-needed to prevent upgrading numpy (which would require GCC 9.3+)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install \
+        --trusted-host pypi.org \
+        --trusted-host files.pythonhosted.org \
+        --timeout 600 \
+        --default-timeout 600 \
+        --upgrade-strategy=only-if-needed \
+        --target /build/python-packages \
+        -r requirements_heavy.txt
+
+# ============================================================================
+# STAGE 2: Runtime - Create optimized Lambda image
+# ============================================================================
 FROM public.ecr.aws/lambda/python:3.11
 
 # Set working directory
 WORKDIR ${LAMBDA_TASK_ROOT}
 
-# Install system dependencies for OpenCV, FFmpeg, and build tools
+# Install ONLY runtime dependencies (no build tools)
 # - libgomp: Required by OpenCV for parallel processing
-# - gcc, gcc-c++: Required for compiling Python packages with native extensions
 # - mesa-libGL: Provides libGL.so.1 for OpenCV (fixes "cannot open shared object file" error)
 # - libXext, libSM, libXrender: X11 libraries required by OpenCV/MediaPipe
 # - tar: Required for extracting FFmpeg static build
@@ -18,8 +69,6 @@ RUN echo "sslverify=0" >> /etc/yum.conf && \
     yum update -y && \
     yum install -y \
         libgomp \
-        gcc \
-        gcc-c++ \
         mesa-libGL \
         libXext \
         libSM \
@@ -39,16 +88,8 @@ RUN curl -L --insecure https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-
     rm -rf /tmp/ffmpeg* && \
     ffmpeg -version
 
-# Copy requirements file
-COPY src/process-clip/requirements_lambda.txt requirements_lambda.txt
-
-# Install Python dependencies
-# NOTE: SSL verification disabled due to certificate issues in build environment
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir \
-        --trusted-host pypi.org \
-        --trusted-host files.pythonhosted.org \
-        -r requirements_lambda.txt
+# Copy Python packages from builder stage
+COPY --from=builder /build/python-packages ${LAMBDA_TASK_ROOT}
 
 # Copy shared utilities (scalability features)
 # These go in /opt/python to match Lambda Layer path
@@ -63,6 +104,12 @@ RUN pip install --no-cache-dir \
 
 # Copy Lambda function code
 COPY src/process-clip/lambda_function.py lambda_function.py
+
+# Copy classification integration
+COPY src/process-clip/classification_integration.py classification_integration.py
+
+# Copy classification system (all plugins)
+COPY src/process-clip/classification/ classification/
 
 # Copy smart_framing module
 COPY src/process-clip/smart_framing/ smart_framing/
