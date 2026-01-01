@@ -1,9 +1,11 @@
-# This is a backup file dont consider this for development 
+# This is a backup file dont consider this for development
 
 """
 Lambda Function 1: Download Video from YouTube
 Handles downloading YouTube video and uploading to S3
 Uses yt-dlp for reliable downloads
+
+HIGH PRIORITY FIX #19: Added retry logic with exponential backoff for YouTube downloads
 """
 import json
 import boto3
@@ -12,6 +14,8 @@ import os
 import subprocess
 import re
 import time
+# HIGH PRIORITY FIX #19: Retry logic for transient failures
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 # Storage helper - works with S3, R2, B2, and any S3-compatible storage
 def get_storage_client():
     """Get S3-compatible storage client (supports AWS S3, Cloudflare R2, Backblaze B2, etc.)"""
@@ -75,6 +79,298 @@ class ProgressPercentage:
                     print(f"[Upload Progress] {percentage:.1f}% ({self._seen_so_far / (1024*1024):.1f}/{self._size / (1024*1024):.1f} MB)")
         else:
             self._seen_so_far += bytes_amount
+
+def validate_youtube_url(url):
+    """
+    SECURITY FIX: Validate YouTube URL format to prevent injection attacks
+
+    Args:
+        url (str): YouTube URL to validate
+
+    Returns:
+        bool: True if valid YouTube URL, False otherwise
+    """
+    if not url or not isinstance(url, str):
+        return False
+
+    # Remove whitespace
+    url = url.strip()
+
+    # YouTube URL patterns
+    youtube_patterns = [
+        r'^https?://(www\.)?youtube\.com/watch\?v=[\w-]{11}',
+        r'^https?://youtu\.be/[\w-]{11}',
+        r'^https?://m\.youtube\.com/watch\?v=[\w-]{11}',
+    ]
+
+    for pattern in youtube_patterns:
+        if re.match(pattern, url):
+            return True
+
+    return False
+
+
+def validate_downloaded_video(local_path):
+    """
+    HIGH PRIORITY FIX #26: Validate downloaded video file
+
+    Validates that the downloaded file is:
+    1. A valid video file (has video streams)
+    2. Not corrupted
+    3. Has acceptable duration (30s - 1 hour)
+    4. Has acceptable file size
+
+    Args:
+        local_path (str): Path to downloaded video file
+
+    Returns:
+        dict: Video validation info with duration, size, format
+
+    Raises:
+        Exception: If video is invalid, corrupted, or out of acceptable range
+    """
+    print("[Download] HIGH PRIORITY FIX #26: Validating downloaded video file...")
+
+    # Check file exists
+    if not os.path.exists(local_path):
+        raise Exception("Downloaded file not found")
+
+    # Check file size is reasonable (min 1MB, max 2GB)
+    file_size = os.path.getsize(local_path)
+    file_size_mb = file_size / (1024 * 1024)
+    print(f"[Download] File size: {file_size_mb:.2f} MB")
+
+    if file_size < 1024 * 1024:  # Less than 1MB
+        raise Exception("Downloaded file too small - likely corrupted or incomplete")
+
+    if file_size > 2 * 1024 * 1024 * 1024:  # More than 2GB
+        raise Exception("Downloaded file too large - exceeds 2GB limit")
+
+    # Use ffprobe to validate video file
+    ffprobe_path = '/opt/bin/ffprobe'
+    if not os.path.exists(ffprobe_path):
+        ffprobe_path = 'ffprobe'  # Fallback to system ffprobe
+
+    try:
+        # Get video metadata using ffprobe
+        probe_cmd = [
+            ffprobe_path,
+            '-v', 'error',
+            '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name',
+            '-of', 'json',
+            local_path
+        ]
+
+        probe_result = subprocess.run(
+            probe_cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30
+        )
+
+        probe_data = json.loads(probe_result.stdout)
+
+        # Validate format exists
+        if 'format' not in probe_data:
+            raise Exception("Invalid video file - no format information found")
+
+        # Validate duration
+        if 'duration' not in probe_data['format']:
+            raise Exception("Invalid video file - no duration information found")
+
+        duration = float(probe_data['format']['duration'])
+        print(f"[Download] Video duration: {duration:.2f} seconds")
+
+        # Check duration range (30 seconds - 1 hour)
+        if duration < 30:
+            raise Exception(f"Video too short - must be at least 30 seconds (got {duration:.1f}s)")
+
+        if duration > 3600:
+            raise Exception(f"Video too long - must be less than 1 hour (got {duration/60:.1f} minutes)")
+
+        # Validate video streams exist
+        if 'streams' not in probe_data:
+            raise Exception("Invalid video file - no stream information found")
+
+        has_video_stream = False
+        video_codec = None
+
+        for stream in probe_data['streams']:
+            if stream.get('codec_type') == 'video':
+                has_video_stream = True
+                video_codec = stream.get('codec_name', 'unknown')
+                break
+
+        if not has_video_stream:
+            raise Exception("Invalid video file - no video stream found (audio-only or corrupted)")
+
+        print(f"[Download] Video codec: {video_codec}")
+        print(f"[Download] Format: {probe_data['format'].get('format_name', 'unknown')}")
+        print("[Download] ✓ Video file validation passed!")
+
+        return {
+            'duration': duration,
+            'size_mb': file_size_mb,
+            'codec': video_codec,
+            'format': probe_data['format'].get('format_name', 'unknown')
+        }
+
+    except subprocess.TimeoutExpired:
+        raise Exception("Video validation timeout - file may be corrupted")
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if e.stderr else str(e)
+        raise Exception(f"Video validation failed - ffprobe error: {error_msg}")
+    except json.JSONDecodeError:
+        raise Exception("Video validation failed - invalid ffprobe output")
+    except Exception as e:
+        raise Exception(f"Video validation failed: {str(e)}")
+
+
+# HIGH PRIORITY FIX #19: Retry logic for YouTube info fetching
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type((subprocess.TimeoutExpired, subprocess.CalledProcessError)),
+    reraise=True
+)
+def fetch_video_info_with_retry(ytdlp_path, youtube_url, cookies_file=None):
+    """
+    HIGH PRIORITY FIX #19: Fetch video info with retry logic
+
+    Retries up to 3 times with exponential backoff (4s, 8s, 10s)
+    for transient YouTube API failures
+
+    Args:
+        ytdlp_path (str): Path to yt-dlp binary
+        youtube_url (str): YouTube video URL
+        cookies_file (str, optional): Path to cookies file
+
+    Returns:
+        dict: Video information (title, duration, etc.)
+
+    Raises:
+        Exception: After 3 failed attempts
+    """
+    print("[Download] Fetching video info (with retry logic)...")
+    info_start = time.time()
+
+    info_cmd = [
+        ytdlp_path,
+        '--dump-json',
+        '--no-playlist',
+        '--no-check-formats',
+        '--skip-download',
+        '--remote-components', 'ejs:github',
+    ]
+
+    if cookies_file and os.path.exists(cookies_file):
+        info_cmd.extend(['--cookies', cookies_file])
+        print("[Download] Using cookies with default client")
+    else:
+        print("[Download] No cookies - using android client")
+        info_cmd.extend(['--extractor-args', 'youtube:player_client=android'])
+        info_cmd.extend(['--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'])
+
+    info_cmd.append(youtube_url)
+
+    try:
+        info_result = subprocess.run(
+            info_cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=45
+        )
+        print(f"[Download] Info fetched in {time.time() - info_start:.2f}s")
+
+        video_data = json.loads(info_result.stdout)
+        video_info = {
+            'title': video_data.get('title', 'Unknown'),
+            'duration': video_data.get('duration', 0),
+            'description': video_data.get('description', '')[:500],
+            'uploader': video_data.get('uploader', 'Unknown'),
+            'view_count': video_data.get('view_count', 0),
+            'thumbnail_url': video_data.get('thumbnail', '')
+        }
+
+        print(f"[Download] Title: {video_info['title']}")
+        print(f"[Download] Duration: {video_info['duration']} seconds")
+
+        # Check duration limit (1 hour max)
+        if video_info['duration'] > 3600:
+            raise Exception("Video duration exceeds 1 hour limit")
+
+        return video_info
+
+    except subprocess.TimeoutExpired:
+        print("[Download] Video info fetch timeout - will retry...")
+        raise
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if e.stderr else str(e)
+        print(f"[Download] yt-dlp stderr: {error_msg}")
+        print("[Download] Info fetch failed - will retry...")
+        raise
+    except json.JSONDecodeError as e:
+        print(f"[Download] JSON decode error: {str(e)}")
+        raise Exception("Failed to parse video info")
+
+
+# HIGH PRIORITY FIX #19: Retry logic for YouTube download
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=4, max=10),
+    retry=retry_if_exception_type((subprocess.TimeoutExpired, subprocess.CalledProcessError)),
+    reraise=True
+)
+def download_video_with_retry(download_cmd, local_path):
+    """
+    HIGH PRIORITY FIX #19: Download video with retry logic
+
+    Retries up to 3 times with exponential backoff (4s, 8s, 10s)
+    for transient network failures or YouTube throttling
+
+    Args:
+        download_cmd (list): yt-dlp command with arguments
+        local_path (str): Local path to save downloaded video
+
+    Returns:
+        float: Download time in seconds
+
+    Raises:
+        Exception: After 3 failed attempts
+    """
+    print("[Download] Starting yt-dlp download (with retry logic)...")
+    download_start = time.time()
+
+    try:
+        download_result = subprocess.run(
+            download_cmd,
+            check=True,
+            capture_output=False,
+            timeout=240  # 4 minutes
+        )
+        download_time = time.time() - download_start
+
+        # Verify file exists
+        if not os.path.exists(local_path):
+            print("[Download] ERROR: Downloaded file not found - will retry...")
+            raise subprocess.CalledProcessError(1, download_cmd, "Downloaded file not found")
+
+        file_size_mb = os.path.getsize(local_path) / (1024*1024)
+        download_speed_mbps = file_size_mb / download_time if download_time > 0 else 0
+        print(f"[Download] yt-dlp completed in {download_time:.2f}s ({download_speed_mbps:.2f} MB/s)")
+
+        return download_time
+
+    except subprocess.TimeoutExpired:
+        print("[Download] Download timeout - will retry...")
+        raise
+    except subprocess.CalledProcessError as e:
+        print(f"[Download] yt-dlp failed with exit code: {e.returncode} - will retry...")
+        raise
+
+
 def lambda_handler(event, context):
    """
    Download YouTube video and upload to S3
@@ -97,6 +393,12 @@ def lambda_handler(event, context):
        print(f"[Download] Session: {session_id}")
        print(f"[Download] URL: {youtube_url}")
        print(f"[Download] Lambda Request ID: {context.aws_request_id if context else 'N/A'}")
+
+       # SECURITY FIX: Validate YouTube URL before processing
+       if not validate_youtube_url(youtube_url):
+           error_msg = f"Invalid YouTube URL format: {youtube_url}"
+           print(f"[Download] ERROR: {error_msg}")
+           raise Exception(error_msg)
        # Clean URL
        if '&' in youtube_url and 'v=' in youtube_url:
            video_id = youtube_url.split('v=')[1].split('&')[0]
@@ -147,62 +449,11 @@ def lambda_handler(event, context):
                'thumbnail_url': ''
            }
        else:
-           # Get video info first using yt-dlp with speed optimizations
-           print("[Download] Fetching video info...")
-           info_start = time.time()
-           info_cmd = [
-               ytdlp_path,
-               '--dump-json',
-               '--no-playlist',
-               '--no-check-formats',  # Skip format validation for speed
-               '--skip-download',  # Only get info, don't download yet
-               '--remote-components', 'ejs:github',
-           ]
-           # With cookies, use default client (like your working local command)
-           if cookies_file and os.path.exists(cookies_file):
-               info_cmd.extend(['--cookies', cookies_file])
-               print("[Download] Using cookies with default client")
-               # Don't force player_client - let yt-dlp choose automatically
-           else:
-               print("[Download] No cookies - using android client")
-               # Use android client without cookies
-               info_cmd.extend(['--extractor-args', 'youtube:player_client=android'])
-               info_cmd.extend(['--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'])
-           info_cmd.append(youtube_url)
+           # HIGH PRIORITY FIX #19: Use retry logic for fetching video info
            try:
-               info_result = subprocess.run(
-                   info_cmd,
-                   capture_output=True,
-                   text=True,
-                   check=True,
-                   timeout=45  # Reduced timeout
-               )
-               print(f"[Download] Info fetched in {time.time() - info_start:.2f}s")
-               video_data = json.loads(info_result.stdout)
-               video_info = {
-                   'title': video_data.get('title', 'Unknown'),
-                   'duration': video_data.get('duration', 0),
-                   'description': video_data.get('description', '')[:500],
-                   'uploader': video_data.get('uploader', 'Unknown'),
-                   'view_count': video_data.get('view_count', 0),
-                   'thumbnail_url': video_data.get('thumbnail', '')
-               }
-               print(f"[Download] Title: {video_info['title']}")
-               print(f"[Download] Duration: {video_info['duration']} seconds")
-               # Check duration limit (1 hour max)
-               if video_info['duration'] > 3600:
-                   raise Exception("Video duration exceeds 1 hour limit")
-           except subprocess.TimeoutExpired:
-               raise Exception("Video info fetch timeout after 45 seconds")
-           except subprocess.CalledProcessError as e:
-               error_msg = e.stderr if e.stderr else str(e)
-               # Print full error for debugging
-               print(f"[Download] yt-dlp stderr: {error_msg}")
-               raise Exception(f"Failed to get video info: {error_msg}")
-           except json.JSONDecodeError as e:
-               print(f"[Download] JSON decode error: {str(e)}")
-               print(f"[Download] Raw output: {info_result.stdout[:500]}")
-               raise Exception("Failed to parse video info")
+               video_info = fetch_video_info_with_retry(ytdlp_path, youtube_url, cookies_file)
+           except Exception as e:
+               raise Exception(f"Failed to get video info after 3 retries: {str(e)}")
        # Check if video already exists in storage (avoid re-downloading)
        s3_key = f"{session_id}/original_video.mp4"
        try:
@@ -261,30 +512,29 @@ def lambda_handler(event, context):
            download_cmd.extend(['--extractor-args', 'youtube:player_client=android'])
            download_cmd.extend(['--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'])
        download_cmd.append(youtube_url)
-       print("[Download] Starting yt-dlp download (progress will be shown below)...")
        print(f"[Download] Expected file size: ~{video_info.get('duration', 0) * 0.5:.1f} MB (480p estimate)")
+
+       # HIGH PRIORITY FIX #19: Use retry logic for downloading video
        try:
-           # Don't capture output so we can see progress in CloudWatch logs
-           download_result = subprocess.run(
-               download_cmd,
-               check=True,
-               capture_output=False,  # Let output stream to CloudWatch
-               timeout=240  # 4 minutes should be plenty for 480p
-           )
-           download_time = time.time() - download_start
-           download_speed_mbps = (os.path.getsize(local_path) / (1024*1024)) / download_time if download_time > 0 else 0
-           print(f"[Download] yt-dlp completed in {download_time:.2f}s ({download_speed_mbps:.2f} MB/s)")
-       except subprocess.TimeoutExpired:
-           raise Exception("Video download timeout (4 minutes) - 480p should download faster. Check Lambda network speed.")
-       except subprocess.CalledProcessError as e:
-           print(f"[Download] yt-dlp failed with exit code: {e.returncode}")
-           raise Exception(f"yt-dlp download failed with exit code {e.returncode}")
-       # Verify file exists
-       if not os.path.exists(local_path):
-           raise Exception(f"Downloaded file not found at {local_path}")
+           download_time = download_video_with_retry(download_cmd, local_path)
+       except Exception as e:
+           raise Exception(f"Video download failed after 3 retries: {str(e)}")
+
        file_size = os.path.getsize(local_path)
        file_size_mb = file_size / (1024*1024)
        print(f"[Download] Downloaded {file_size_mb:.2f} MB")
+
+       # HIGH PRIORITY FIX #26: Validate downloaded video file
+       try:
+           validation_info = validate_downloaded_video(local_path)
+           print(f"[Download] Validation passed: {validation_info['duration']:.1f}s, {validation_info['size_mb']:.2f}MB, {validation_info['codec']}")
+       except Exception as validation_error:
+           print(f"[Download] ERROR: Video validation failed: {str(validation_error)}")
+           # Clean up invalid file
+           if os.path.exists(local_path):
+               os.remove(local_path)
+           raise Exception(f"Downloaded video validation failed: {str(validation_error)}")
+
        # Upload to S3 with multipart for faster transfer
        print(f"[Download] Uploading to S3: {s3_key}")
        print(f"[Download] File size: {file_size_mb:.2f} MB")

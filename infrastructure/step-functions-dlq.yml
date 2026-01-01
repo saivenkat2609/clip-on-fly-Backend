@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'HIGH PRIORITY FIX #22: Dead Letter Queue for Step Functions Failed Executions'
+
+# This CloudFormation template creates:
+# 1. SQS Dead Letter Queue for Step Functions failures
+# 2. CloudWatch Alarms for DLQ monitoring
+# 3. Lambda function to process failed executions and notify administrators
+#
+# Benefits:
+# - Failed Step Functions executions are not lost
+# - Automatic notifications for failures
+# - 14-day retention for investigation
+# - Detailed error tracking and analysis
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  NotificationEmail:
+    Type: String
+    Default: ''
+    Description: Email address for DLQ notifications (optional)
+
+Resources:
+  # HIGH PRIORITY FIX #22: Dead Letter Queue for Step Functions
+  StepFunctionsDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${Environment}-step-functions-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days for investigation
+      # Allow Step Functions to send messages
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: StepFunctionsDeadLetterQueue
+        - Key: FixNumber
+          Value: 'HIGH-PRIORITY-FIX-22'
+
+  # SQS Queue Policy - Allow Step Functions to send messages
+  StepFunctionsDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref StepFunctionsDLQ
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt StepFunctionsDLQ.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*'
+
+  # CloudWatch Alarm for DLQ messages
+  StepFunctionsDLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-step-functions-dlq-has-messages'
+      AlarmDescription: 'HIGH PRIORITY FIX #22: Alert when Step Functions execution failures appear in DLQ'
+      MetricName: ApproximateNumberOfMessagesVisible
+      Namespace: AWS/SQS
+      Statistic: Sum
+      Period: 60  # 1 minute
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt StepFunctionsDLQ.QueueName
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !If [HasNotificationEmail, !Ref DLQNotificationTopic, !Ref 'AWS::NoValue']
+
+  # SNS Topic for notifications (optional)
+  DLQNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: HasNotificationEmail
+    Properties:
+      TopicName: !Sub '${Environment}-step-functions-dlq-notifications'
+      DisplayName: Step Functions DLQ Notifications
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # Lambda function to process DLQ messages
+  DLQProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-step-functions-dlq-processor'
+      Description: 'HIGH PRIORITY FIX #22: Process Step Functions DLQ messages and send notifications'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt DLQProcessorLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          SNS_TOPIC_ARN: !If [HasNotificationEmail, !Ref DLQNotificationTopic, '']
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+
+          sns = boto3.client('sns')
+          sfn = boto3.client('stepfunctions')
+
+          def lambda_handler(event, context):
+              """
+              HIGH PRIORITY FIX #22: Process Step Functions DLQ messages
+
+              This Lambda is triggered by SQS messages from the DLQ.
+              It logs the failure details and optionally sends SNS notifications.
+              """
+              print(f"[DLQ-Processor] Processing {len(event['Records'])} DLQ messages")
+
+              for record in event['Records']:
+                  try:
+                      # Parse the message body
+                      message_body = json.loads(record['body'])
+
+                      # Extract failure details
+                      execution_arn = message_body.get('executionArn', 'Unknown')
+                      error = message_body.get('error', 'Unknown error')
+                      cause = message_body.get('cause', 'Unknown cause')
+                      timestamp = message_body.get('timestamp', datetime.utcnow().isoformat())
+
+                      print(f"[DLQ-Processor] Failed execution: {execution_arn}")
+                      print(f"[DLQ-Processor] Error: {error}")
+                      print(f"[DLQ-Processor] Cause: {cause}")
+                      print(f"[DLQ-Processor] Timestamp: {timestamp}")
+
+                      # Get execution details if possible
+                      try:
+                          execution_details = sfn.describe_execution(executionArn=execution_arn)
+                          session_id = extract_session_id(execution_details.get('input', '{}'))
+                          print(f"[DLQ-Processor] Session ID: {session_id}")
+                      except Exception as e:
+                          print(f"[DLQ-Processor] Could not fetch execution details: {str(e)}")
+                          session_id = "Unknown"
+
+                      # Send SNS notification if configured
+                      sns_topic = os.environ.get('SNS_TOPIC_ARN')
+                      if sns_topic:
+                          try:
+                              sns.publish(
+                                  TopicArn=sns_topic,
+                                  Subject=f"[{os.environ.get('ENVIRONMENT')}] Step Functions Execution Failed",
+                                  Message=format_notification_message(
+                                      execution_arn, session_id, error, cause, timestamp
+                                  )
+                              )
+                              print("[DLQ-Processor] SNS notification sent")
+                          except Exception as e:
+                              print(f"[DLQ-Processor] Failed to send SNS notification: {str(e)}")
+
+                      # Log structured data for CloudWatch Insights
+                      print(json.dumps({
+                          'event': 'step_function_failure',
+                          'executionArn': execution_arn,
+                          'sessionId': session_id,
+                          'error': error,
+                          'cause': cause,
+                          'timestamp': timestamp,
+                          'environment': os.environ.get('ENVIRONMENT')
+                      }))
+
+                  except Exception as e:
+                      print(f"[DLQ-Processor] Error processing DLQ message: {str(e)}")
+                      print(f"[DLQ-Processor] Raw message: {record['body']}")
+
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f"Processed {len(event['Records'])} messages")
+              }
+
+          def extract_session_id(execution_input_str):
+              """Extract session_id from Step Functions input"""
+              try:
+                  execution_input = json.loads(execution_input_str)
+                  return execution_input.get('session_id', 'Unknown')
+              except:
+                  return 'Unknown'
+
+          def format_notification_message(execution_arn, session_id, error, cause, timestamp):
+              """Format a human-readable notification message"""
+              return f"""Step Functions Execution Failed
+
+Execution ARN: {execution_arn}
+Session ID: {session_id}
+Error: {error}
+Cause: {cause}
+Timestamp: {timestamp}
+
+Action Required:
+1. Check CloudWatch Logs for the execution
+2. Review DLQ messages in SQS console
+3. Investigate the root cause
+4. Consider manual retry if appropriate
+
+Environment: {os.environ.get('ENVIRONMENT')}
+"""
+
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: DLQProcessor
+        - Key: FixNumber
+          Value: 'HIGH-PRIORITY-FIX-22'
+
+  # IAM Role for DLQ Processor Lambda
+  DLQProcessorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-dlq-processor-lambda-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DLQProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read from SQS DLQ
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt StepFunctionsDLQ.Arn
+              # Read Step Functions execution details
+              - Effect: Allow
+                Action:
+                  - states:DescribeExecution
+                  - states:GetExecutionHistory
+                Resource: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*:*'
+              # Send SNS notifications
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !If [HasNotificationEmail, !Ref DLQNotificationTopic, !Ref 'AWS::NoValue']
+
+  # Event Source Mapping - Trigger Lambda from SQS DLQ
+  DLQProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      FunctionName: !Ref DLQProcessorLambda
+      EventSourceArn: !GetAtt StepFunctionsDLQ.Arn
+      BatchSize: 10
+      MaximumBatchingWindowInSeconds: 5
+      Enabled: true
+
+Conditions:
+  HasNotificationEmail: !Not [!Equals [!Ref NotificationEmail, '']]
+
+Outputs:
+  StepFunctionsDLQUrl:
+    Description: URL of the Step Functions DLQ
+    Value: !Ref StepFunctionsDLQ
+    Export:
+      Name: !Sub '${Environment}-StepFunctionsDLQUrl'
+
+  StepFunctionsDLQArn:
+    Description: ARN of the Step Functions DLQ (use this in Step Functions state machine definition)
+    Value: !GetAtt StepFunctionsDLQ.Arn
+    Export:
+      Name: !Sub '${Environment}-StepFunctionsDLQArn'
+
+  DLQProcessorLambdaArn:
+    Description: ARN of the DLQ Processor Lambda
+    Value: !GetAtt DLQProcessorLambda.Arn
+    Export:
+      Name: !Sub '${Environment}-DLQProcessorLambdaArn'
+
+  ConfigurationInstructions:
+    Description: How to configure Step Functions to use this DLQ
+    Value: |
+      Add this to your Step Functions state machine definition:
+
+      {
+        "Comment": "Video Processing Pipeline",
+        "StartAt": "DownloadVideo",
+        "States": {
+          ...
+        },
+        "Catch": [
+          {
+            "ErrorEquals": ["States.ALL"],
+            "ResultPath": "$.error",
+            "Next": "SendToDLQ"
+          }
+        ]
+      }
+
+      And add this state:
+
+      "SendToDLQ": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::sqs:sendMessage",
+        "Parameters": {
+          "QueueUrl": "<DLQ_URL_FROM_OUTPUT>",
+          "MessageBody": {
+            "executionArn.$": "$$.Execution.Name",
+            "error.$": "$.error.Error",
+            "cause.$": "$.error.Cause",
+            "timestamp.$": "$$.State.EnteredTime"
+          }
+        },
+        "End": true
+      }

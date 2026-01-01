@@ -52,7 +52,7 @@
       "Resource": "arn:aws:states:::lambda:invoke",
       "Comment": "Transcribe uploaded video with word-level timestamps (REUSES EXISTING FUNCTION)",
       "Parameters": {
-        "FunctionName": "opus-transcribe",
+        "FunctionName": "opus-transcribe-apis",
         "Payload": {
           "session_id.$": "$.session_id",
           "s3_video_key.$": "$.uploadResult.s3_video_key",
@@ -101,7 +101,9 @@
           "s3_video_key.$": "$.transcribeResult.s3_video_key",
           "s3_transcript_key.$": "$.transcribeResult.s3_transcript_key",
           "video_info.$": "$.transcribeResult.video_info",
-          "user_id.$": "$.user_id"
+          "user_id.$": "$.user_id",
+          "timeframe.$": "$.timeframe",
+          "num_clips.$": "$.num_clips"
         }
       },
       "ResultPath": "$.detectResult",
@@ -135,14 +137,15 @@
     },
     "PrepareForProcessing": {
       "Type": "Pass",
-      "Comment": "Prepare data for processing with template_id from input",
+      "Comment": "Prepare data for processing with template_id and aspect_ratio from input",
       "Parameters": {
         "session_id.$": "$.session_id",
         "s3_video_key.$": "$.detectResult.s3_video_key",
         "detectResult.$": "$.detectResult",
         "user_id.$": "$.user_id",
         "user_email.$": "$.user_email",
-        "template_id.$": "$.template_id"
+        "template_id.$": "$.template_id",
+        "aspect_ratio.$": "$.aspect_ratio"
       },
       "Next": "ProcessClipsInParallel"
     },
@@ -156,7 +159,8 @@
         "s3_video_key.$": "$.detectResult.s3_video_key",
         "clip.$": "$$.Map.Item.Value",
         "user_id.$": "$.user_id",
-        "template_id.$": "$.template_id"
+        "template_id.$": "$.template_id",
+        "aspect_ratio.$": "$.aspect_ratio"
       },
       "Iterator": {
         "StartAt": "ProcessSingleClip",
@@ -166,12 +170,14 @@
             "Resource": "arn:aws:states:::lambda:invoke",
             "Comment": "Process individual clip with aspect ratio conversion and karaoke subtitles",
             "Parameters": {
-              "FunctionName": "opus-process-clip",
+              "FunctionName": "opus-process-smart-framing",
               "Payload": {
                 "session_id.$": "$.session_id",
                 "s3_video_key.$": "$.s3_video_key",
                 "clip.$": "$.clip",
-                "template_id.$": "$.template_id"
+                "user_id.$": "$.user_id",
+                "template_id.$": "$.template_id",
+                "aspect_ratio.$": "$.aspect_ratio"
               }
             },
             "ResultSelector": {

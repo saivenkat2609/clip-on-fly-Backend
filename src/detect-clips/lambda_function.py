@@ -75,7 +75,7 @@ BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
 MIN_CLIP_DURATION = int(os.environ.get('MIN_CLIP_DURATION', '15'))
 MAX_CLIP_DURATION = int(os.environ.get('MAX_CLIP_DURATION', '60'))
 TARGET_CLIP_DURATION = int(os.environ.get('TARGET_CLIP_DURATION', '45'))
-NUM_CLIPS = int(os.environ.get('NUM_CLIPS', '3'))
+NUM_CLIPS = int(os.environ.get('NUM_CLIPS', '4'))  # Default changed to match UI
 
 # AI Configuration for virality scoring
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
@@ -120,6 +120,54 @@ def lambda_handler(event, context):
         s3_video_key = event['s3_video_key']
         transcript_key = event['s3_transcript_key']
         video_info = event.get('video_info', {})
+
+        # Extract user parameters (override env variables with user selections)
+        user_timeframe_raw = event.get('timeframe', 'auto')  # 'auto', '15', '30', '60'
+        user_num_clips_raw = event.get('num_clips', NUM_CLIPS)  # Number of clips to generate
+
+        # HIGH PRIORITY FIX #27: Validate user-controlled parameters to prevent attacks
+        # Validate num_clips - must be integer between 1 and 20
+        try:
+            user_num_clips = int(user_num_clips_raw)
+            if user_num_clips < 1:
+                print(f"[Detect] Invalid num_clips={user_num_clips} (too low), using default={NUM_CLIPS}")
+                user_num_clips = NUM_CLIPS
+            elif user_num_clips > 20:
+                print(f"[Detect] Invalid num_clips={user_num_clips} (too high), capping at 20")
+                user_num_clips = 20
+        except (ValueError, TypeError):
+            print(f"[Detect] Invalid num_clips type={type(user_num_clips_raw)}, using default={NUM_CLIPS}")
+            user_num_clips = NUM_CLIPS
+
+        # Validate timeframe - must be in whitelist
+        valid_timeframes = ['auto', '15', '30', '45', '60']
+        if user_timeframe_raw not in valid_timeframes:
+            print(f"[Detect] Invalid timeframe='{user_timeframe_raw}', using default='auto'")
+            user_timeframe = 'auto'
+        else:
+            user_timeframe = user_timeframe_raw
+
+        print(f"[Detect] HIGH PRIORITY FIX #27: Parameter validation passed")
+        print(f"[Detect]   - num_clips: {user_num_clips} (valid range: 1-20)")
+        print(f"[Detect]   - timeframe: {user_timeframe} (valid options: {valid_timeframes})")
+
+        # Calculate clip duration settings based on user timeframe
+        if user_timeframe == 'auto':
+            # Use environment variable defaults
+            min_duration = MIN_CLIP_DURATION
+            max_duration = MAX_CLIP_DURATION
+            target_duration = TARGET_CLIP_DURATION
+        else:
+            # Use user-specified timeframe
+            target_duration = int(user_timeframe)
+            # Set min/max with some flexibility (±5 seconds)
+            min_duration = MIN_CLIP_DURATION
+            max_duration = min(90, target_duration + 5)
+
+        print(f"[Detect] User Settings:")
+        print(f"  - Timeframe: {user_timeframe}")
+        print(f"  - Number of Clips: {user_num_clips}")
+        print(f"  - Clip Duration: {min_duration}-{max_duration}s (target: {target_duration}s)")
 
         # Structured logging
         if logger:
@@ -197,21 +245,30 @@ def lambda_handler(event, context):
         # Use AI to detect clips (with circuit breaker and retry)
         if USE_AI_SCORING and GROQ_API_KEY:
             try:
-                final_clips = detect_clips_with_ai_improved(segments, NUM_CLIPS, session_id)
+                final_clips = detect_clips_with_ai_improved(
+                    segments, user_num_clips, session_id,
+                    min_duration, max_duration, target_duration
+                )
             except Exception as e:
                 if logger:
                     logger.warning("AI detection failed, using fallback", error=str(e))
                 else:
                     print(f"[Detect] AI detection failed: {str(e)}, using fallback")
 
-                final_clips = detect_clips_fallback(segments, NUM_CLIPS)
+                final_clips = detect_clips_fallback(
+                    segments, user_num_clips,
+                    min_duration, max_duration, target_duration
+                )
         else:
             if logger:
                 logger.info("Using fallback detection (AI disabled)")
             else:
                 print(f"[Detect] Using fallback detection (AI disabled or no API key)")
 
-            final_clips = detect_clips_fallback(segments, NUM_CLIPS)
+            final_clips = detect_clips_fallback(
+                segments, user_num_clips,
+                min_duration, max_duration, target_duration
+            )
 
         # Add clip_index and generate titles
         for idx, clip in enumerate(final_clips):
@@ -335,9 +392,10 @@ def lambda_handler(event, context):
         raise Exception(f"Failed to detect clips: {error_msg}")
 
 
-def detect_clips_with_ai_improved(segments, num_clips, session_id):
+def detect_clips_with_ai_improved(segments, num_clips, session_id, min_duration, max_duration, target_duration):
     """
     Use Groq AI to detect viral clips with circuit breaker and retry logic
+    Uses user-specified duration parameters
     """
     if logger:
         logger.info("Starting AI clip detection", segment_count=len(segments))
@@ -358,8 +416,8 @@ TRANSCRIPT:
 {full_transcript[:4000]}
 
 REQUIREMENTS:
-- Each clip must be {MIN_CLIP_DURATION}-{MAX_CLIP_DURATION} seconds long
-- Target duration: ~{TARGET_CLIP_DURATION} seconds
+- Each clip must be {min_duration}-{max_duration} seconds long
+- Target duration: ~{target_duration} seconds
 - Clips should NOT overlap
 - Identify clips with strong hooks, good pacing, high engagement potential
 
@@ -471,7 +529,7 @@ Respond ONLY with valid JSON array (no markdown, no extra text):
         duration = actual_end - actual_start
 
         # Validate duration
-        if duration < MIN_CLIP_DURATION or duration > MAX_CLIP_DURATION:
+        if duration < min_duration or duration > max_duration:
             continue
 
         clip_text = ' '.join(clip_text_parts)
@@ -507,9 +565,10 @@ Respond ONLY with valid JSON array (no markdown, no extra text):
     return final_clips
 
 
-def detect_clips_fallback(segments, num_clips):
+def detect_clips_fallback(segments, num_clips, min_duration, max_duration, target_duration):
     """
     Fallback clip detection using basic heuristics (no AI)
+    Uses user-specified duration parameters
     """
     if logger:
         logger.info("Using fallback detection")
@@ -523,9 +582,9 @@ def detect_clips_fallback(segments, num_clips):
             clip_end = segments[j - 1]['end']
             duration = clip_end - clip_start
 
-            if duration < MIN_CLIP_DURATION:
+            if duration < min_duration:
                 continue
-            if duration > MAX_CLIP_DURATION:
+            if duration > max_duration:
                 break
 
             clip_text = ' '.join([seg['text'] for seg in segments[i:j]])

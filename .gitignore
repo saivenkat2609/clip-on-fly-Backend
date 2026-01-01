@@ -10,7 +10,9 @@ ENV/
 *.egg-info/
 dist/
 build/
-
+src/finalize/*
+!src/finalize/requirements.txt
+!src/finalize/lambda_function.py
 # Project specific
 downloads/
 outputs/

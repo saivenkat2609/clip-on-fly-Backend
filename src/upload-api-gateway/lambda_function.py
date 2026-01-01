@@ -7,7 +7,19 @@ import json
 import boto3
 import uuid
 import os
+import sys
 from botocore.config import Config
+
+# Add shared directory to Python path for imports
+sys.path.insert(0, '/opt/python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
+
+try:
+    from rate_limiter import check_rate_limit
+    RATE_LIMITING_ENABLED = True
+except ImportError as e:
+    print(f"[API-Upload] Warning: Rate limiter not available: {e}")
+    RATE_LIMITING_ENABLED = False
 
 stepfunctions = boto3.client('stepfunctions')
 
@@ -40,17 +52,31 @@ MAX_FILE_SIZE = int(os.environ.get('MAX_FILE_SIZE', '524288000'))  # 500MB defau
 UPLOAD_EXPIRY = int(os.environ.get('UPLOAD_EXPIRY', '3600'))  # 1 hour
 
 def get_cors_headers():
-    """Return CORS headers for all responses"""
+    """
+    SECURITY FIX: Return CORS headers for all responses
+    Fixed: Cannot set Allow-Credentials: true with Allow-Origin: *
+    """
     # Get allowed origins from environment (comma-separated list)
     allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*')
 
-    return {
+    headers = {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': allowed_origins.split(',')[0] if allowed_origins != '*' else '*',
-        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+        # HIGH PRIORITY FIX #13: Added X-Requested-With and X-Client-Version for CSRF protection
+        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Requested-With,X-Client-Version',
         'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-        'Access-Control-Allow-Credentials': 'true'
     }
+
+    # SECURITY FIX: Only set credentials if origin is specific (not wildcard)
+    if allowed_origins and allowed_origins != '*':
+        # Use specific origin
+        headers['Access-Control-Allow-Origin'] = allowed_origins.split(',')[0]
+        headers['Access-Control-Allow-Credentials'] = 'true'
+    else:
+        # Wildcard origin - don't set credentials (violates CORS spec)
+        headers['Access-Control-Allow-Origin'] = '*'
+        # Do not set Allow-Credentials with wildcard origin
+
+    return headers
 
 def lambda_handler(event, context):
     """
@@ -114,6 +140,19 @@ def handle_generate_upload_url(event):
                 'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
             }
 
+        # HIGH PRIORITY FIX #7: Rate limiting check
+        if RATE_LIMITING_ENABLED:
+            if not check_rate_limit(user_id, '/upload/generate-url'):
+                print(f"[API-Upload] Rate limit exceeded for user {user_id} on /upload/generate-url endpoint")
+                return {
+                    'statusCode': 429,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({
+                        'error': 'Too many requests. Please try again later.',
+                        'retry_after': 3600  # 1 hour in seconds
+                    })
+                }
+
         # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
         file_name = body.get('fileName')
@@ -127,6 +166,32 @@ def handle_generate_upload_url(event):
                 'statusCode': 400,
                 'headers': get_cors_headers(),
                 'body': json.dumps({'error': 'fileName and fileSize are required'})
+            }
+
+        # HIGH PRIORITY FIX #14: Validate Content-Type to prevent XSS attacks
+        # Only allow video content types to prevent uploading HTML/JS files
+        ALLOWED_CONTENT_TYPES = [
+            'video/mp4',
+            'video/webm',
+            'video/mpeg',
+            'video/quicktime',
+            'video/x-msvideo',  # .avi
+            'video/x-matroska',  # .mkv
+            'video/ogg',
+            'video/3gpp',  # .3gp
+            'video/x-flv',  # .flv
+            'video/mp2t',  # .ts
+        ]
+
+        if content_type not in ALLOWED_CONTENT_TYPES:
+            print(f"[API-Upload] ERROR: Invalid content type rejected: {content_type}")
+            return {
+                'statusCode': 400,
+                'headers': get_cors_headers(),
+                'body': json.dumps({
+                    'error': f'Invalid content type: {content_type}. Only video files are allowed.',
+                    'allowed_types': ALLOWED_CONTENT_TYPES
+                })
             }
 
         # Validate file size
@@ -205,6 +270,19 @@ def handle_start_processing(event):
                 'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
             }
 
+        # HIGH PRIORITY FIX #7: Rate limiting check
+        if RATE_LIMITING_ENABLED:
+            if not check_rate_limit(user_id, '/upload/start'):
+                print(f"[API-Upload] Rate limit exceeded for user {user_id} on /upload/start endpoint")
+                return {
+                    'statusCode': 429,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({
+                        'error': 'Too many requests. Please try again later.',
+                        'retry_after': 3600  # 1 hour
+                    })
+                }
+
         # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
         session_id = body.get('session_id')
@@ -212,6 +290,9 @@ def handle_start_processing(event):
         video_description = body.get('videoDescription', '')
         s3_key = body.get('s3_key')
         template_id = body.get('template_id', 'prof-modern-minimal')  # Extract template_id from UI
+        aspect_ratio = body.get('aspect_ratio', '9:16')  # Extract aspect_ratio from UI
+        timeframe = body.get('timeframe', 'auto')  # Extract timeframe from UI
+        num_clips = body.get('num_clips', 3)  # Extract num_clips from UI
 
         if not session_id:
             return {
@@ -228,11 +309,45 @@ def handle_start_processing(event):
         print(f"[API-Upload] User Email: {user_email}")
         print(f"[API-Upload] S3 Key: {s3_key}")
         print(f"[API-Upload] Template ID: {template_id}")
+        print(f"[API-Upload] Aspect Ratio: {aspect_ratio}")
+        print(f"[API-Upload] Timeframe: {timeframe}")
+        print(f"[API-Upload] Number of Clips: {num_clips}")
 
-        # Verify upload exists (optional - Worker already confirmed upload)
+        # HIGH PRIORITY FIX #10: Verify upload exists and validate actual file size
         try:
-            s3.head_object(Bucket=BUCKET_NAME, Key=s3_key)
+            head_response = s3.head_object(Bucket=BUCKET_NAME, Key=s3_key)
+            actual_file_size = head_response['ContentLength']
             print(f"[API-Upload] File verified in R2: {s3_key}")
+            print(f"[API-Upload] Actual uploaded file size: {actual_file_size / 1024 / 1024:.2f} MB")
+
+            # Validate that actual uploaded file size doesn't exceed maximum
+            if actual_file_size > MAX_FILE_SIZE:
+                print(f"[API-Upload] ERROR: Uploaded file size {actual_file_size / 1024 / 1024:.2f} MB exceeds limit of {MAX_FILE_SIZE / 1024 / 1024:.2f} MB")
+
+                # Delete the oversized file
+                try:
+                    s3.delete_object(Bucket=BUCKET_NAME, Key=s3_key)
+                    print(f"[API-Upload] Deleted oversized file: {s3_key}")
+                except Exception as delete_error:
+                    print(f"[API-Upload] Warning: Failed to delete oversized file: {str(delete_error)}")
+
+                return {
+                    'statusCode': 413,  # 413 Payload Too Large
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({
+                        'error': f'Uploaded file size {actual_file_size / 1024 / 1024:.2f} MB exceeds limit of {MAX_FILE_SIZE / 1024 / 1024:.2f} MB',
+                        'max_size_mb': MAX_FILE_SIZE / 1024 / 1024,
+                        'uploaded_size_mb': round(actual_file_size / 1024 / 1024, 2)
+                    })
+                }
+
+        except s3.exceptions.NoSuchKey:
+            print(f"[API-Upload] ERROR: File not found in R2: {s3_key}")
+            return {
+                'statusCode': 404,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Uploaded file not found. Please upload the file first.'})
+            }
         except Exception as e:
             print(f"[API-Upload] Warning: Could not verify file in R2: {str(e)}")
             print(f"[API-Upload] Continuing anyway since Worker confirmed upload...")
@@ -250,7 +365,10 @@ def handle_start_processing(event):
                 'video_title': video_title,
                 'video_description': video_description,
                 'source': 'upload',
-                'template_id': template_id  # Pass template_id to Step Functions
+                'template_id': template_id,  # Pass template_id to Step Functions
+                'aspect_ratio': aspect_ratio,  # Pass aspect_ratio to Step Functions
+                'timeframe': timeframe,  # Pass timeframe to Step Functions
+                'num_clips': num_clips  # Pass num_clips to Step Functions
             })
         )
 
