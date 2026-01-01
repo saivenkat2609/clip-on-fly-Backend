@@ -70,13 +70,16 @@
         "video_info.$": "$.downloadResult.video_info",
         "user_id.$": "$.user_id",
         "user_email.$": "$.user_email",
-        "template_id.$": "$.template_id"
+        "template_id.$": "$.template_id",
+        "aspect_ratio.$": "$.aspect_ratio",
+        "timeframe.$": "$.timeframe",
+        "num_clips.$": "$.num_clips"
       },
       "Next": "TranscribeVideo"
     },
     "TranscribeVideo": {
       "Type": "Task",
-      "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-transcribe",
+      "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-transcribe-apis",
       "Comment": "Transcribe audio using Whisper",
       "ResultPath": "$.transcribeResult",
       "ResultSelector": {
@@ -117,7 +120,10 @@
         "video_info.$": "$.transcribeResult.video_info",
         "user_id.$": "$.user_id",
         "user_email.$": "$.user_email",
-        "template_id.$": "$.template_id"
+        "template_id.$": "$.template_id",
+        "aspect_ratio.$": "$.aspect_ratio",
+        "timeframe.$": "$.timeframe",
+        "num_clips.$": "$.num_clips"
       },
       "Next": "DetectClips"
     },
@@ -162,7 +168,10 @@
         "video_info.$": "$.detectResult.video_info",
         "user_id.$": "$.user_id",
         "user_email.$": "$.user_email",
-        "template_id.$": "$.template_id"
+        "template_id.$": "$.template_id",
+        "aspect_ratio.$": "$.aspect_ratio",
+        "timeframe.$": "$.timeframe",
+        "num_clips.$": "$.num_clips"
       },
       "Next": "CheckClipsFound"
     },
@@ -188,20 +197,23 @@
         "clip.$": "$$.Map.Item.Value",
         "user_id.$": "$.user_id",
         "user_email.$": "$.user_email",
-        "template_id.$": "$.template_id"
+        "template_id.$": "$.template_id",
+        "aspect_ratio.$": "$.aspect_ratio"
       },
       "Iterator": {
         "StartAt": "ProcessSingleClip",
         "States": {
           "ProcessSingleClip": {
             "Type": "Task",
-            "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-process-clip",
-            "Comment": "Extract clip, convert to 9:16, add subtitles",
+            "Resource": "arn:aws:lambda:us-east-1:930115312558:function:opus-process-smart-framing",
+            "Comment": "Extract clip, convert to user-selected aspect ratio, add subtitles",
             "Parameters": {
               "session_id.$": "$.session_id",
               "s3_video_key.$": "$.s3_video_key",
               "clip.$": "$.clip",
-              "template_id.$": "$.template_id"
+              "user_id.$": "$.user_id",
+              "template_id.$": "$.template_id",
+              "aspect_ratio.$": "$.aspect_ratio"
             },
             "End": true,
             "Retry": [

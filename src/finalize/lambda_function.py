@@ -15,6 +15,8 @@ import sys
 
 # Add Lambda Layer path
 sys.path.insert(0, '/opt/python')
+# Add shared modules path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
 
 # Import scalability utilities (graceful fallback)
 try:
@@ -27,6 +29,15 @@ try:
 except ImportError as e:
     print(f"[Finalize] Warning: Shared utilities not available: {str(e)}")
     UTILITIES_AVAILABLE = False
+
+# HIGH PRIORITY FIX #9: Import Firebase Admin SDK-based Firestore client
+try:
+    from shared.firestore_client import get_firestore_client
+    FIRESTORE_CLIENT_AVAILABLE = True
+    print("[Finalize] Firestore Admin SDK client loaded successfully")
+except ImportError as e:
+    print(f"[Finalize] Warning: Firestore client not available: {str(e)}")
+    FIRESTORE_CLIENT_AVAILABLE = False
 
 # Initialize logger if available
 if UTILITIES_AVAILABLE:
@@ -58,26 +69,34 @@ def get_storage_client():
 s3 = get_storage_client()
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
 FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'reframeai-87b24')
-FIREBASE_WEB_API_KEY = os.environ.get('FIREBASE_WEB_API_KEY', '')
+
 
 def update_firestore_video(user_id, session_id, data):
     """
-    Update video status in Firestore using REST API
+    HIGH PRIORITY FIX #9: Update video status in Firestore using Admin SDK
+    Replaced Firebase Web API Key with Admin SDK for secure backend authentication
     """
-    if not user_id or not FIREBASE_WEB_API_KEY:
-        print("[Firestore] Skipping update - missing user_id or API key")
+    if not user_id:
+        print("[Firestore] Skipping update - missing user_id")
+        return
+
+    if not FIRESTORE_CLIENT_AVAILABLE:
+        print("[Firestore] WARNING: Firestore client not available, skipping update")
         return
 
     try:
-        # Firestore REST API endpoint
-        url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{user_id}/videos/{session_id}"
+        db = get_firestore_client()
+        if not db:
+            print("[Firestore] ERROR: Could not initialize Firestore client")
+            return
 
-        # Transform data to Firestore format
-        firestore_data = {
-            "fields": {
-                "status": {"stringValue": data.get("status", "completed")},
-                "completedAt": {"timestampValue": datetime.utcnow().isoformat() + "Z"}
-            }
+        # Reference to the video document
+        doc_ref = db.collection('users').document(user_id).collection('videos').document(session_id)
+
+        # Build update data
+        update_data = {
+            'status': data.get('status', 'completed'),
+            'completedAt': datetime.utcnow()
         }
 
         # Add clips data
@@ -85,146 +104,99 @@ def update_firestore_video(user_id, session_id, data):
             clips_array = []
             # Calculate expiry: 3 days from now
             expiry_time = datetime.utcnow() + timedelta(days=3)
-            expiry_iso = expiry_time.isoformat() + "Z"
 
             for clip in data["clips"]:
-                clip_fields = {
-                    "clipIndex": {"integerValue": str(clip["clip_index"])},
-                    "downloadUrl": {"stringValue": clip["download_url"]},
-                    "s3Key": {"stringValue": clip["s3_key"]},
-                    "expiresAt": {"timestampValue": expiry_iso}  # 3-day TTL
+                clip_obj = {
+                    "clipIndex": clip["clip_index"],
+                    "downloadUrl": clip["download_url"],
+                    "s3Key": clip["s3_key"],
+                    "expiresAt": expiry_time
                 }
 
                 # Add optional fields if present
                 if "title" in clip and clip["title"]:
-                    clip_fields["title"] = {"stringValue": clip["title"]}
+                    clip_obj["title"] = clip["title"]
                 if "virality_score" in clip and clip["virality_score"] is not None:
-                    clip_fields["virality_score"] = {"integerValue": str(clip["virality_score"])}
+                    clip_obj["virality_score"] = clip["virality_score"]
                 if "duration" in clip and clip["duration"] is not None:
-                    clip_fields["duration"] = {"doubleValue": clip["duration"]}
+                    clip_obj["duration"] = clip["duration"]
                 if "startTime" in clip and clip["startTime"] is not None:
-                    clip_fields["startTime"] = {"doubleValue": clip["startTime"]}
+                    clip_obj["startTime"] = clip["startTime"]
                 if "endTime" in clip and clip["endTime"] is not None:
-                    clip_fields["endTime"] = {"doubleValue": clip["endTime"]}
+                    clip_obj["endTime"] = clip["endTime"]
                 if "template_id" in clip and clip["template_id"]:
-                    clip_fields["template_id"] = {"stringValue": clip["template_id"]}
+                    clip_obj["template_id"] = clip["template_id"]
                 if "template_name" in clip and clip["template_name"]:
-                    clip_fields["template_name"] = {"stringValue": clip["template_name"]}
+                    clip_obj["template_name"] = clip["template_name"]
 
                 # Add score breakdown if present
                 if "score_breakdown" in clip and clip["score_breakdown"]:
-                    breakdown = clip["score_breakdown"]
-                    clip_fields["score_breakdown"] = {
-                        "mapValue": {
-                            "fields": {
-                                "hook": {"integerValue": str(breakdown.get("hook", 0))},
-                                "flow": {"integerValue": str(breakdown.get("flow", 0))},
-                                "engagement": {"integerValue": str(breakdown.get("engagement", 0))},
-                                "trend": {"integerValue": str(breakdown.get("trend", 0))}
-                            }
-                        }
-                    }
+                    clip_obj["score_breakdown"] = clip["score_breakdown"]
 
-                clips_array.append({
-                    "mapValue": {
-                        "fields": clip_fields
-                    }
-                })
-            firestore_data["fields"]["clips"] = {"arrayValue": {"values": clips_array}}
+                clips_array.append(clip_obj)
+
+            update_data["clips"] = clips_array
 
         # Add video info if present
         if "video_info" in data and data["video_info"]:
             video_info = data["video_info"]
-            firestore_data["fields"]["videoInfo"] = {
-                "mapValue": {
-                    "fields": {
-                        "title": {"stringValue": video_info.get("title", "")},
-                        "duration": {"integerValue": str(video_info.get("duration", 0))},
-                        "thumbnail": {"stringValue": video_info.get("thumbnail", "")}
-                    }
-                }
+            update_data["videoInfo"] = {
+                "title": video_info.get("title", ""),
+                "duration": video_info.get("duration", 0),
+                "thumbnail": video_info.get("thumbnail", "")
             }
 
         # Add error if present
         if "error" in data:
-            firestore_data["fields"]["error"] = {"stringValue": data["error"]}
-            firestore_data["fields"]["status"] = {"stringValue": "failed"}
+            update_data["error"] = data["error"]
+            update_data["status"] = "failed"
 
         # Update document (merge with existing fields)
-        # Build query string with multiple updateMask.fieldPaths
-        query_params = [
-            f"key={FIREBASE_WEB_API_KEY}",
-            "updateMask.fieldPaths=status",
-            "updateMask.fieldPaths=completedAt",
-            "updateMask.fieldPaths=clips",
-            "updateMask.fieldPaths=videoInfo",
-            "updateMask.fieldPaths=error"
-        ]
-        params = "&".join(query_params)
-
-        full_url = f"{url}?{params}"
-        headers = {"Content-Type": "application/json"}
-        data = json.dumps(firestore_data).encode('utf-8')
-
-        req = urllib.request.Request(full_url, data=data, headers=headers, method='PATCH')
-
-        try:
-            with urllib.request.urlopen(req, timeout=10) as response:
-                print(f"[Firestore] Successfully updated video {session_id}")
-        except urllib.error.HTTPError as e:
-            print(f"[Firestore] Update failed: {e.code} - {e.read().decode()}")
+        doc_ref.set(update_data, merge=True)
+        print(f"[Firestore] ✓ Successfully updated video {session_id}")
 
     except Exception as e:
         print(f"[Firestore] Error updating document: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 
 def update_user_stats(user_id, total_clips):
     """
-    Increment user's totalClips count in Firestore
+    HIGH PRIORITY FIX #9: Increment user's totalClips count in Firestore using Admin SDK
+    Replaced Firebase Web API Key with Admin SDK for secure backend authentication
     """
-    if not user_id or not FIREBASE_WEB_API_KEY:
-        print("[Firestore] Skipping stats update - missing user_id or API key")
+    if not user_id:
+        print("[Firestore] Skipping stats update - missing user_id")
+        return
+
+    if not FIRESTORE_CLIENT_AVAILABLE:
+        print("[Firestore] WARNING: Firestore client not available, skipping stats update")
         return
 
     try:
-        url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{user_id}"
+        db = get_firestore_client()
+        if not db:
+            print("[Firestore] ERROR: Could not initialize Firestore client")
+            return
 
-        # Get current totalClips value
-        get_url = f"{url}?key={FIREBASE_WEB_API_KEY}"
+        # Import firestore for FieldValue
+        from firebase_admin import firestore as admin_firestore
 
-        try:
-            with urllib.request.urlopen(get_url, timeout=10) as response:
-                doc = json.loads(response.read().decode())
-                current_clips = int(doc.get("fields", {}).get("totalClips", {}).get("integerValue", 0))
-                new_total = current_clips + total_clips
+        # Reference to user document
+        user_ref = db.collection('users').document(user_id)
 
-                # Update with new value
-                update_data = {
-                    "fields": {
-                        "totalClips": {"integerValue": str(new_total)}
-                    }
-                }
+        # Use Firestore increment to atomically add to totalClips
+        user_ref.set({
+            'totalClips': admin_firestore.Increment(total_clips)
+        }, merge=True)
 
-                params = urllib.parse.urlencode({
-                    "key": FIREBASE_WEB_API_KEY,
-                    "updateMask.fieldPaths": "totalClips"
-                })
-                update_url = f"{url}?{params}"
-                data = json.dumps(update_data).encode('utf-8')
-                headers = {"Content-Type": "application/json"}
-
-                req = urllib.request.Request(update_url, data=data, headers=headers, method='PATCH')
-
-                try:
-                    with urllib.request.urlopen(req, timeout=10) as update_response:
-                        print(f"[Firestore] Updated user stats: totalClips = {new_total}")
-                except urllib.error.HTTPError as e:
-                    print(f"[Firestore] Stats update failed: {e.code}")
-
-        except urllib.error.HTTPError as e:
-            print(f"[Firestore] Failed to fetch user doc: {e.code}")
+        print(f"[Firestore] ✓ Incremented user stats: totalClips += {total_clips}")
 
     except Exception as e:
         print(f"[Firestore] Error updating user stats: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 def lambda_handler(event, context):
     """

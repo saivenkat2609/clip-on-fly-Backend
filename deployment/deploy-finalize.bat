@@ -23,6 +23,11 @@ mkdir %BUILD_DIR%
 echo [1/5] Copying source code...
 copy ..\src\finalize\lambda_function.py %BUILD_DIR%\
 
+echo [1.5/5] Copying shared modules...
+if exist ..\src\shared mkdir %BUILD_DIR%\shared
+if exist ..\src\shared\*.py copy ..\src\shared\*.py %BUILD_DIR%\shared\
+echo Shared modules copied.
+
 echo [2/5] Installing dependencies...
 if exist ..\src\finalize\requirements.txt (
     pip install -r ..\src\finalize\requirements.txt -t %BUILD_DIR% --quiet
