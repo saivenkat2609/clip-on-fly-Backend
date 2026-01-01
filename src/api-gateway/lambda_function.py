@@ -6,6 +6,19 @@ import json
 import boto3
 import uuid
 import os
+import re
+import sys
+
+# Add shared directory to Python path for imports
+sys.path.insert(0, '/opt/python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
+
+try:
+    from rate_limiter import check_rate_limit
+    RATE_LIMITING_ENABLED = True
+except ImportError as e:
+    print(f"[API] Warning: Rate limiter not available: {e}")
+    RATE_LIMITING_ENABLED = False
 
 stepfunctions = boto3.client('stepfunctions')
 def get_storage_client():
@@ -31,17 +44,65 @@ STATE_MACHINE_ARN = os.environ.get('STATE_MACHINE_ARN')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
 
 def get_cors_headers():
-    """Return CORS headers for all responses"""
+    """
+    SECURITY FIX: Return CORS headers for all responses
+    Fixed: Cannot set Allow-Credentials: true with Allow-Origin: *
+    """
     # Get allowed origins from environment (comma-separated list)
     allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*')
 
-    return {
+    headers = {
         'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': allowed_origins.split(',')[0] if allowed_origins != '*' else '*',
-        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
+        # HIGH PRIORITY FIX #13: Added X-Requested-With and X-Client-Version for CSRF protection
+        'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Requested-With,X-Client-Version',
         'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-        'Access-Control-Allow-Credentials': 'true'
     }
+
+    # SECURITY FIX: Only set credentials if origin is specific (not wildcard)
+    if allowed_origins and allowed_origins != '*':
+        # Use specific origin
+        headers['Access-Control-Allow-Origin'] = allowed_origins.split(',')[0]
+        headers['Access-Control-Allow-Credentials'] = 'true'
+    else:
+        # Wildcard origin - don't set credentials (violates CORS spec)
+        headers['Access-Control-Allow-Origin'] = '*'
+        # Do not set Allow-Credentials with wildcard origin
+
+    return headers
+
+def validate_youtube_url(url):
+    """
+    SECURITY FIX: Validate YouTube URL format to prevent injection attacks
+
+    Args:
+        url (str): YouTube URL to validate
+
+    Returns:
+        bool: True if valid YouTube URL, False otherwise
+    """
+    if not url or not isinstance(url, str):
+        return False
+
+    # Remove whitespace
+    url = url.strip()
+
+    # YouTube URL patterns
+    # Supports:
+    # - https://www.youtube.com/watch?v=VIDEO_ID
+    # - https://youtube.com/watch?v=VIDEO_ID
+    # - https://youtu.be/VIDEO_ID
+    # - https://m.youtube.com/watch?v=VIDEO_ID
+    youtube_patterns = [
+        r'^https?://(www\.)?youtube\.com/watch\?v=[\w-]{11}',
+        r'^https?://youtu\.be/[\w-]{11}',
+        r'^https?://m\.youtube\.com/watch\?v=[\w-]{11}',
+    ]
+
+    for pattern in youtube_patterns:
+        if re.match(pattern, url):
+            return True
+
+    return False
 
 def lambda_handler(event, context):
     """
@@ -109,18 +170,45 @@ def handle_process(event):
                 'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
             }
 
+        # HIGH PRIORITY FIX #7: Rate limiting check
+        if RATE_LIMITING_ENABLED:
+            if not check_rate_limit(user_id, '/process'):
+                print(f"[API] Rate limit exceeded for user {user_id} on /process endpoint")
+                return {
+                    'statusCode': 429,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({
+                        'error': 'Too many requests. Please try again later.',
+                        'retry_after': 3600  # 1 hour in seconds
+                    })
+                }
+
         # Parse request body (user_id no longer accepted from client)
         body = json.loads(event.get('body', '{}'))
         youtube_url = body.get('youtube_url')
         project_name = body.get('project_name', 'Untitled Project')
         start_from = body.get('startFrom', 'download')
         template_id = body.get('template_id', 'prof-modern-minimal')  # Extract template_id from UI
+        aspect_ratio = body.get('aspect_ratio', '9:16')  # Extract aspect_ratio from UI
+        timeframe = body.get('timeframe', 'auto')  # Extract timeframe from UI
+        num_clips = body.get('num_clips', 3)  # Extract num_clips from UI
 
         if not youtube_url:
             return {
                 'statusCode': 400,
                 'headers': get_cors_headers(),
                 'body': json.dumps({'error': 'youtube_url is required'})
+            }
+
+        # SECURITY FIX: Validate YouTube URL format
+        if not validate_youtube_url(youtube_url):
+            print(f"[API] Invalid YouTube URL format: {youtube_url}")
+            return {
+                'statusCode': 400,
+                'headers': get_cors_headers(),
+                'body': json.dumps({
+                    'error': 'Invalid YouTube URL format. Please provide a valid YouTube URL (e.g., https://www.youtube.com/watch?v=VIDEO_ID or https://youtu.be/VIDEO_ID)'
+                })
             }
 
         # Generate session ID
@@ -132,6 +220,9 @@ def handle_process(event):
         print(f"[API] YouTube URL: {youtube_url}")
         print(f"[API] Project Name: {project_name}")
         print(f"[API] Template ID: {template_id}")
+        print(f"[API] Aspect Ratio: {aspect_ratio}")
+        print(f"[API] Timeframe: {timeframe}")
+        print(f"[API] Number of Clips: {num_clips}")
 
         # Start Step Functions execution
         execution = stepfunctions.start_execution(
@@ -143,7 +234,10 @@ def handle_process(event):
                 'user_id': user_id,
                 'user_email': user_email,
                 'startFrom': start_from,
-                'template_id': template_id  # Pass template_id to Step Functions
+                'template_id': template_id,  # Pass template_id to Step Functions
+                'aspect_ratio': aspect_ratio,  # Pass aspect_ratio to Step Functions
+                'timeframe': timeframe,  # Pass timeframe to Step Functions
+                'num_clips': num_clips  # Pass num_clips to Step Functions
             })
         )
 
@@ -263,6 +357,21 @@ def handle_result(event, path):
                     'body': json.dumps({'error': 'Result not found'})
                 }
 
+        # SECURITY FIX: Verify ownership - Check if the session belongs to the authenticated user
+        if user_id:
+            session_owner_id = result_data.get('user_id')
+            if session_owner_id and session_owner_id != user_id:
+                print(f"[API] ERROR: Authorization denied - User {user_id} attempted to access result owned by {session_owner_id}")
+                return {
+                    'statusCode': 403,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({'error': 'Forbidden - You can only access your own results'})
+                }
+            print(f"[API] Authorization verified - User {user_id} owns session {session_id}")
+        else:
+            # If no user_id in context, this is an unauthenticated request (shouldn't happen with authorizer)
+            print(f"[API] WARNING: No user_id in context for result request")
+
         return {
             'statusCode': 200,
             'headers': get_cors_headers(),
@@ -294,6 +403,19 @@ def handle_reprocess_clip(event):
                 'body': json.dumps({'error': 'Unauthorized - Invalid or missing authentication token'})
             }
 
+        # HIGH PRIORITY FIX #7: Rate limiting check
+        if RATE_LIMITING_ENABLED:
+            if not check_rate_limit(user_id, '/reprocess-clip'):
+                print(f"[API] Rate limit exceeded for user {user_id} on /reprocess-clip endpoint")
+                return {
+                    'statusCode': 429,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({
+                        'error': 'Too many requests. Please try again later.',
+                        'retry_after': 3600  # 1 hour in seconds
+                    })
+                }
+
         # Parse request body
         body = json.loads(event.get('body', '{}'))
         session_id = body.get('session_id')
@@ -310,8 +432,43 @@ def handle_reprocess_clip(event):
         print(f"[API] Reprocessing clip - Session: {session_id}, Clip: {clip_index}, Template: {template_id}")
         print(f"[API] User ID: {user_id} (verified via JWT)")
 
-        # TODO: Verify user owns this session before reprocessing
-        # For now, we'll allow any authenticated user to reprocess
+        # SECURITY FIX: Verify user owns this session before reprocessing
+        # Try user-specific location first (newer)
+        result_key = f"users/{user_id}/{session_id}/result.json"
+        result_data = None
+
+        try:
+            print(f"[API] Verifying ownership - checking: {result_key}")
+            obj = s3.get_object(Bucket=BUCKET_NAME, Key=result_key)
+            result_data = json.loads(obj['Body'].read())
+            print(f"[API] Found result in user-specific location")
+        except s3.exceptions.NoSuchKey:
+            # Fallback to legacy location
+            result_key = f"{session_id}/result.json"
+            try:
+                print(f"[API] Checking legacy location: {result_key}")
+                obj = s3.get_object(Bucket=BUCKET_NAME, Key=result_key)
+                result_data = json.loads(obj['Body'].read())
+                print(f"[API] Found result in legacy location")
+            except s3.exceptions.NoSuchKey:
+                print(f"[API] ERROR: Session {session_id} not found")
+                return {
+                    'statusCode': 404,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({'error': 'Session not found'})
+                }
+
+        # Verify ownership: Check if the session belongs to the authenticated user
+        session_owner_id = result_data.get('user_id')
+        if session_owner_id != user_id:
+            print(f"[API] ERROR: Authorization denied - User {user_id} attempted to reprocess session owned by {session_owner_id}")
+            return {
+                'statusCode': 403,
+                'headers': get_cors_headers(),
+                'body': json.dumps({'error': 'Forbidden - You can only reprocess your own clips'})
+            }
+
+        print(f"[API] Authorization verified - User {user_id} owns session {session_id}")
 
         # Invoke reprocess-clip Lambda
         lambda_client = boto3.client('lambda')

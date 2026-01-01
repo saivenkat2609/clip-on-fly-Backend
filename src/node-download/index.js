@@ -191,6 +191,36 @@ function getVideoKey(user_id, session_id, filename = 'original_video.mp4') {
 }
 
 /**
+ * CRITICAL ISSUE #6: Validate YouTube URL format to prevent injection attacks
+ *
+ * @param {string} url - YouTube URL to validate
+ * @returns {boolean} - True if valid YouTube URL, False otherwise
+ */
+function validateYoutubeUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return false;
+  }
+
+  // Remove whitespace
+  url = url.trim();
+
+  // YouTube URL patterns - must match exactly 11-character video ID
+  const youtubePatterns = [
+    /^https?:\/\/(www\.)?youtube\.com\/watch\?v=[\w-]{11}/,
+    /^https?:\/\/youtu\.be\/[\w-]{11}/,
+    /^https?:\/\/m\.youtube\.com\/watch\?v=[\w-]{11}/,
+  ];
+
+  for (const pattern of youtubePatterns) {
+    if (pattern.test(url)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Convert stream to string
  */
 async function streamToString(stream) {
@@ -259,6 +289,176 @@ async function downloadCookies() {
       "[Download] Continuing WITHOUT cookies (will use Android client)"
     );
     return null;
+  }
+}
+
+/**
+ * HIGH PRIORITY ISSUE #26: Validate downloaded video file
+ *
+ * Validates that the downloaded file is:
+ * 1. A valid video file (has video streams)
+ * 2. Not corrupted
+ * 3. Has acceptable duration (30s - 1 hour)
+ * 4. Has acceptable file size
+ *
+ * @param {string} localPath - Path to downloaded video file
+ * @returns {Promise<Object>} - Video validation info with duration, size, format
+ * @throws {Error} - If video is invalid, corrupted, or out of acceptable range
+ */
+async function validateDownloadedVideo(localPath) {
+  console.log('[Download] HIGH PRIORITY FIX #26: Validating downloaded video file...');
+
+  // Check file exists
+  if (!fs.existsSync(localPath)) {
+    throw new Error('Downloaded file not found');
+  }
+
+  // Check file size is reasonable (min 1MB, max 2GB)
+  const fileSize = fs.statSync(localPath).size;
+  const fileSizeMB = fileSize / (1024 * 1024);
+  console.log(`[Download] File size: ${fileSizeMB.toFixed(2)} MB`);
+
+  if (fileSize < 1024 * 1024) {  // Less than 1MB
+    throw new Error('Downloaded file too small - likely corrupted or incomplete');
+  }
+
+  if (fileSize > 2 * 1024 * 1024 * 1024) {  // More than 2GB
+    throw new Error('Downloaded file too large - exceeds 2GB limit');
+  }
+
+  // Use ffprobe to validate video file
+  const ffprobePath = process.env.FFPROBE_PATH || '/opt/bin/ffprobe';
+
+  try {
+    // Get video metadata using ffprobe
+    const probeArgs = [
+      '-v', 'error',
+      '-show_entries', 'format=duration,format_name:stream=codec_type,codec_name',
+      '-of', 'json',
+      localPath
+    ];
+
+    const probeResult = await new Promise((resolve, reject) => {
+      const ffprobe = spawn(ffprobePath, probeArgs);
+      let stdout = '';
+      let stderr = '';
+
+      ffprobe.stdout.on('data', (data) => { stdout += data.toString(); });
+      ffprobe.stderr.on('data', (data) => { stderr += data.toString(); });
+
+      const timeoutId = setTimeout(() => {
+        ffprobe.kill();
+        reject(new Error('Video validation timeout - file may be corrupted'));
+      }, 30000);  // 30 second timeout
+
+      ffprobe.on('close', (code) => {
+        clearTimeout(timeoutId);
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          reject(new Error(`ffprobe error: ${stderr || stdout}`));
+        }
+      });
+
+      ffprobe.on('error', (err) => {
+        clearTimeout(timeoutId);
+        reject(new Error(`Failed to spawn ffprobe: ${err.message}`));
+      });
+    });
+
+    const probeData = JSON.parse(probeResult.stdout);
+
+    // Validate format exists
+    if (!probeData.format) {
+      throw new Error('Invalid video file - no format information found');
+    }
+
+    // Validate duration
+    if (!probeData.format.duration) {
+      throw new Error('Invalid video file - no duration information found');
+    }
+
+    const duration = parseFloat(probeData.format.duration);
+    console.log(`[Download] Video duration: ${duration.toFixed(2)} seconds`);
+
+    // Check duration range (30 seconds - 1 hour)
+    if (duration < 30) {
+      throw new Error(`Video too short - must be at least 30 seconds (got ${duration.toFixed(1)}s)`);
+    }
+
+    if (duration > 3600) {
+      throw new Error(`Video too long - must be less than 1 hour (got ${(duration / 60).toFixed(1)} minutes)`);
+    }
+
+    // Validate video streams exist
+    if (!probeData.streams || probeData.streams.length === 0) {
+      throw new Error('Invalid video file - no stream information found');
+    }
+
+    let hasVideoStream = false;
+    let videoCodec = null;
+
+    for (const stream of probeData.streams) {
+      if (stream.codec_type === 'video') {
+        hasVideoStream = true;
+        videoCodec = stream.codec_name || 'unknown';
+        break;
+      }
+    }
+
+    if (!hasVideoStream) {
+      throw new Error('Invalid video file - no video stream found (audio-only or corrupted)');
+    }
+
+    console.log(`[Download] Video codec: ${videoCodec}`);
+    console.log(`[Download] Format: ${probeData.format.format_name || 'unknown'}`);
+    console.log('[Download] ✓ Video file validation passed!');
+
+    return {
+      duration: duration,
+      size_mb: fileSizeMB,
+      codec: videoCodec,
+      format: probeData.format.format_name || 'unknown'
+    };
+
+  } catch (error) {
+    throw new Error(`Video validation failed: ${error.message}`);
+  }
+}
+
+/**
+ * HIGH PRIORITY ISSUE #19: Retry wrapper with exponential backoff
+ *
+ * Retries a function with exponential backoff on failure.
+ * Delays: 1s, 2s, 4s (3 attempts total)
+ *
+ * @param {Function} fn - Async function to retry
+ * @param {number} maxAttempts - Maximum retry attempts (default: 3)
+ * @param {string} operationName - Name for logging
+ * @returns {Promise} - Result of the function
+ */
+async function retryWithBackoff(fn, maxAttempts = 3, operationName = 'operation') {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      console.log(`[Download] HIGH PRIORITY FIX #19: Attempting ${operationName} (attempt ${attempt}/${maxAttempts})...`);
+      const result = await fn();
+      if (attempt > 1) {
+        console.log(`[Download] ✓ ${operationName} succeeded on attempt ${attempt}`);
+      }
+      return result;
+    } catch (error) {
+      console.log(`[Download] ✗ ${operationName} failed on attempt ${attempt}: ${error.message}`);
+
+      if (attempt === maxAttempts) {
+        console.log(`[Download] All ${maxAttempts} attempts failed for ${operationName}`);
+        throw error;
+      }
+
+      // Exponential backoff: 1s, 2s, 4s
+      const delaySeconds = Math.pow(2, attempt - 1);
+      console.log(`[Download] Waiting ${delaySeconds}s before retry...`);
+      await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+    }
   }
 }
 
@@ -376,6 +576,13 @@ exports.handler = async (event, context) => {
         `Missing required parameters: session_id=${session_id}, youtube_url=${youtube_url}`
       );
     }
+
+    // CRITICAL ISSUE #6: Validate YouTube URL format to prevent injection attacks
+    console.log('[Download] CRITICAL FIX #6: Validating YouTube URL...');
+    if (!validateYoutubeUrl(youtube_url)) {
+      throw new Error(`Invalid YouTube URL format: ${youtube_url}. Only youtube.com, youtu.be, and m.youtube.com URLs are allowed.`);
+    }
+    console.log('[Download] ✓ YouTube URL validation passed');
 
     // Clean URL
     let cleanUrl = youtube_url;
@@ -571,10 +778,17 @@ exports.handler = async (event, context) => {
     );
 
     try {
-      await runYtdlp(downloadArgs, {
-        timeout: 240000, // 4 minutes
-        captureOutput: false, // Let output stream to CloudWatch
-      });
+      // HIGH PRIORITY ISSUE #19: Retry yt-dlp download with exponential backoff
+      await retryWithBackoff(
+        async () => {
+          return await runYtdlp(downloadArgs, {
+            timeout: 240000, // 4 minutes
+            captureOutput: false, // Let output stream to CloudWatch
+          });
+        },
+        3,
+        'yt-dlp download'
+      );
 
       const downloadTime = ((Date.now() - downloadStart) / 1000).toFixed(2);
       const fileSize = fs.statSync(localPath).size;
@@ -604,6 +818,27 @@ exports.handler = async (event, context) => {
     const fileSize = fs.statSync(localPath).size;
     const fileSizeMB = (fileSize / (1024 * 1024)).toFixed(2);
     console.log(`[Download] Downloaded ${fileSizeMB} MB`);
+
+    // HIGH PRIORITY ISSUE #26: Validate downloaded video file (if ffprobe available)
+    const SKIP_VIDEO_VALIDATION = process.env.SKIP_VIDEO_VALIDATION === 'true';
+    const ffprobePath = process.env.FFPROBE_PATH || '/opt/bin/ffprobe';
+
+    if (!SKIP_VIDEO_VALIDATION && fs.existsSync(ffprobePath)) {
+      try {
+        const validationInfo = await validateDownloadedVideo(localPath);
+        console.log(`[Download] Video validated: ${validationInfo.duration.toFixed(1)}s, ${validationInfo.size_mb.toFixed(2)}MB, ${validationInfo.codec}, ${validationInfo.format}`);
+      } catch (validationError) {
+        console.log(`[Download] ✗ Video validation failed: ${validationError.message}`);
+        // Clean up invalid file
+        if (fs.existsSync(localPath)) {
+          fs.unlinkSync(localPath);
+        }
+        throw new Error(`Downloaded video validation failed: ${validationError.message}`);
+      }
+    } else {
+      console.log(`[Download] ⚠️ Skipping video validation - ffprobe not available at ${ffprobePath}`);
+      console.log(`[Download] Set SKIP_VIDEO_VALIDATION=false and ensure ffprobe is in Lambda layer for validation`);
+    }
 
     // Upload to R2/S3 with multipart for faster transfer (matches Python)
     console.log(`[Download] Uploading to S3: ${s3_key}`);
