@@ -91,8 +91,9 @@ FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/usr/local/bin/ffprobe')
 # ALWAYS enable karaoke subtitles (no env variable needed - always True)
 ADD_SUBTITLES = True  # Karaoke subtitles always enabled
 
-# Smart Framing is now automatically enabled for 9:16 (vertical) videos
-# No longer controlled by environment variable
+# Classification toggle (set USE_CLASSIFICATION=true to enable AI-based content classification)
+# When enabled, classification determines smart framing, subtitle mode, and other processing settings
+USE_CLASSIFICATION = os.environ.get('USE_CLASSIFICATION', 'true').lower() == 'true'
 
 # Aspect ratio from environment variable (default: 9:16 for vertical/shorts)
 DEFAULT_ASPECT_RATIO = os.environ.get('ASPECT_RATIO', '9:16')
@@ -357,7 +358,7 @@ def lambda_handler(event, context):
 
         # Classify video and get processing configuration
         processing_config = None
-        if CLASSIFICATION_AVAILABLE and _classification_service:
+        if USE_CLASSIFICATION and ENABLE_SMART_FRAMING and CLASSIFICATION_AVAILABLE and _classification_service:
             print(f"[Classification] Classifying clip with full analysis (NLP + Audio + Visual)...")
             processing_config = classify_and_configure_processing(
                 service=_classification_service,
@@ -402,13 +403,26 @@ def lambda_handler(event, context):
                 print(f"[Classification] Overriding aspect ratio: {aspect_ratio} -> {classification_ratio}")
                 aspect_ratio = classification_ratio
 
-        # Check if smart framing is enabled and available
+        # Determine if smart framing should be used
+        # Priority: Classification recommendation > Environment variable
+        if processing_config and processing_config.get('classified'):
+            # Classification was successful - use its recommendation
+            use_smart_framing_decision = smart_framing_recommended
+            decision_source = "classification"
+        else:
+            # No classification - use environment variable
+            use_smart_framing_decision = ENABLE_SMART_FRAMING
+            decision_source = "environment variable"
+
         use_smart_framing = (
             not skip_smart_framing and  # Don't use if explicitly skipped
-            (smart_framing_recommended or ENABLE_SMART_FRAMING) and  # Recommended by classifier OR enabled globally
+            use_smart_framing_decision and  # Decision from classification or env var
             SMART_FRAMING_AVAILABLE and
             clip.get('segments')  # Need transcript for speaker tracking
         )
+
+        if use_smart_framing:
+            print(f"[ProcessClip] Smart framing enabled (source: {decision_source})")
 
         if skip_smart_framing:
             print(f"[ProcessClip] Smart framing skipped (reprocessing mode for faster template changes)")
@@ -832,13 +846,13 @@ def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect
             video_height,
             target_aspect=aspect_ratio,
             padding_ratio=0.15,
-            smoothing_sigma=0.5,
+            smoothing_sigma=2.0,  # INCREASED from 0.5 to 2.0 for much smoother transitions
             face_timeline=face_timeline,
             enable_motion_keyframes=True,
-            motion_threshold=100,
-            max_keyframe_interval=3.0,
+            motion_threshold=150,  # INCREASED from 100 to 150 to reduce jitter
+            max_keyframe_interval=4.0,  # INCREASED from 3.0 to 4.0 for more stability
             use_sticky_crop=True,  # Enable sticky crop for stable framing
-            dead_zone_radius=150
+            dead_zone_radius=200  # INCREASED from 150 to 200 for more stable locking
         )
 
         print(f"[SmartFraming] Generated {len(crop_timeline)} keyframes")
