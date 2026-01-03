@@ -18,6 +18,20 @@ sys.path.insert(0, '/opt/python')
 # Add shared modules path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
 
+# DEBUG: Check if firebase-admin is accessible
+print(f"[DEBUG] sys.path: {sys.path[:3]}")  # Show first 3 paths
+import os as os_check
+if os_check.path.exists('/opt/python'):
+    print(f"[DEBUG] /opt/python exists")
+    opt_contents = os_check.listdir('/opt/python')
+    print(f"[DEBUG] /opt/python contents: {opt_contents[:10]}")  # First 10 items
+    if 'firebase_admin' in opt_contents:
+        print("[DEBUG] ✅ firebase_admin found in /opt/python")
+    else:
+        print("[DEBUG] ❌ firebase_admin NOT in /opt/python")
+else:
+    print("[DEBUG] ❌ /opt/python does not exist")
+
 # Import scalability utilities (graceful fallback)
 try:
     from shared.logger import get_logger

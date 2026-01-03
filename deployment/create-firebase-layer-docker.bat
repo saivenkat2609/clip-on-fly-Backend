@@ -29,9 +29,10 @@ echo This may take a few minutes...
 echo.
 
 docker run --rm ^
+    --entrypoint /bin/bash ^
     -v "%CD%\%LAYER_DIR%:/output" ^
     public.ecr.aws/lambda/python:3.11 ^
-    /bin/bash -c "pip install firebase-admin==6.5.0 -t /output/python && echo 'Install complete!'"
+    -c "pip install firebase-admin==6.5.0 -t /output/python --trusted-host pypi.org --trusted-host files.pythonhosted.org --no-cache-dir && echo 'Install complete!'"
 
 if errorlevel 1 (
     echo ERROR: Docker build failed!
