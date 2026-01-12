@@ -479,8 +479,7 @@ def transcribe_smart(audio_path):
     ]
 
     # Execute all methods in parallel
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    try:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         # Submit all tasks
         future_to_method = {
             executor.submit(method_func, audio_path): method_name
@@ -500,26 +499,14 @@ def transcribe_smart(audio_path):
                 print(f"[SmartTranscribe] ✓✓✓ SUCCESS with {method_name} (first to complete) ✓✓✓")
                 print(f"[SmartTranscribe] Word timestamps present: {has_words}")
 
-                # Cancel remaining futures to avoid waiting
-                for remaining_future in future_to_method:
-                    if remaining_future != future:
-                        remaining_future.cancel()
-                        print(f"[SmartTranscribe] Cancelled remaining API call: {future_to_method[remaining_future]}")
-
-                # Shutdown executor without waiting for cancelled tasks
-                executor.shutdown(wait=False)
-
                 return result
 
             except Exception as e:
                 print(f"[SmartTranscribe] ✗ {method_name} failed: {str(e)}")
                 continue
 
-        # All methods failed
-        raise Exception("All transcription methods failed")
-    finally:
-        # Ensure executor is always cleaned up (but don't wait for threads)
-        executor.shutdown(wait=False)
+    # All methods failed
+    raise Exception("All transcription methods failed")
 
 
 # ==================== LAMBDA HANDLER ====================

@@ -68,7 +68,7 @@ def process_clip_with_smart_framing(
     # OPTIMIZE: Limit keyframes to prevent FFmpeg expression overflow
     crop_timeline = optimize_crop_timeline(
         crop_timeline,
-        max_keyframes=50,  # FFmpeg limit for nested expressions
+        max_keyframes=30,  # Reduced from 50 to 30 for faster processing
         preserve_transcript_keyframes=True
     )
 
@@ -84,11 +84,11 @@ def process_clip_with_smart_framing(
     )
     filters.append(crop_filter)
 
-    # 2. Scale to target dimensions with Lanczos (sharper than default)
-    # flags=lanczos provides better quality scaling (sharper edges)
-    scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
+    # 2. Scale to target dimensions with bilinear (faster than lanczos)
+    # flags=bilinear provides fast scaling (optimized for speed)
+    scale_filter = f"scale={target_w}:{target_h}:flags=bilinear"
     filters.append(scale_filter)
-    print(f"[FFmpegSmartCrop] Using Lanczos scaling for sharper output")
+    print(f"[FFmpegSmartCrop] Using bilinear scaling for faster processing")
 
     # 3. Stabilization (optional)
     if stabilize:
@@ -339,12 +339,11 @@ def build_ffmpeg_command(
         '-vf', filter_complex,            # Video filters
         '-c:v', 'libx264',               # Video codec
         '-preset', preset,                # Encoding preset
-        '-crf', '20',                     # Quality (18-28, lower = better)
+        '-crf', '30',                     # Quality (18-28, lower = better) - optimized for speed
+        '-tune', 'fastdecode',           # Optimize for fast decoding
         '-pix_fmt', 'yuv420p',           # Pixel format (maximum compatibility)
-        '-c:a', 'aac',                   # Audio codec
-        '-b:a', '128k',                  # Audio bitrate
-        '-ar', '44100',                  # Audio sample rate
-        '-ac', '2',                      # Audio channels (stereo)
+        '-c:a', 'aac',                   # AAC audio codec (compatible, fast)
+        '-b:a', '128k',                  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024', # Prevent muxing errors
         '-movflags', '+faststart',       # Web-optimized MP4
         '-threads', '0',                 # Use all CPU threads

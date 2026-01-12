@@ -359,12 +359,12 @@ def lambda_handler(event, context):
         # Classify video and get processing configuration
         processing_config = None
         if USE_CLASSIFICATION and ENABLE_SMART_FRAMING and CLASSIFICATION_AVAILABLE and _classification_service:
-            print(f"[Classification] Classifying clip with full analysis (NLP + Audio + Visual)...")
+            print(f"[Classification] Classifying clip with quick mode (NLP only)...")
             processing_config = classify_and_configure_processing(
                 service=_classification_service,
                 clip_info=clip,
                 video_path=local_video_path,  # Pass video path for full analysis
-                use_quick_mode=False  # Full analysis mode (NLP + Audio + Visual in parallel)
+                use_quick_mode=True  # Quick mode (NLP only - MUCH faster, saves 12s per clip)
             )
 
             # Log classification results
@@ -714,12 +714,11 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height},subtitles={ass_path}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
+        '-crf', '30',  # Optimized for speed (slightly lower quality, faster encoding)
+        '-tune', 'fastdecode',  # Optimize for fast decoding
         '-pix_fmt', 'yuv420p',  # Maximum compatibility
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
+        '-c:a', 'aac',  # Re-encode audio to AAC (compatible, fast)
+        '-b:a', '128k',  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024',
         '-movflags', '+faststart',
         '-threads', '0',
@@ -775,15 +774,12 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height},subtitles={ass_path}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
+        '-crf', '30',  # Optimized for speed (slightly lower quality, faster encoding)
+        '-tune', 'fastdecode',  # Optimize for fast decoding
+        '-c:a', 'aac',  # Re-encode audio to AAC (compatible, fast)
+        '-b:a', '128k',  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024',
         '-vsync', '2',  # VFR - prevents subtitle drift
-        '-copyts',  # Preserve timestamps for subtitle sync
-        '-start_at_zero',  # Normalize output timestamps
         '-movflags', '+faststart',
         '-threads', '0',
         '-y',
@@ -825,7 +821,7 @@ def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect
             video_path,
             start_sec=start_time,
             end_sec=end_time,
-            sample_rate=5  # Sample every 5 frames for Lambda
+            sample_rate=10  # Sample every 10 frames for Lambda (optimized for speed)
         )
 
         print(f"[SmartFraming] Detected faces in {len(face_timeline)} frames")
@@ -932,15 +928,12 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
+        '-crf', '30',  # Optimized for speed (slightly lower quality, faster encoding)
+        '-tune', 'fastdecode',  # Optimize for fast decoding
+        '-c:a', 'aac',  # Re-encode audio to AAC (compatible, fast)
+        '-b:a', '128k',  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024',
         '-vsync', '2',  # VFR
-        '-copyts',
-        '-start_at_zero',
         '-movflags', '+faststart',
         '-threads', '0',
         '-y',
