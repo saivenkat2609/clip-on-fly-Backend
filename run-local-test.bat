@@ -59,6 +59,8 @@ if "%GROQ_API_KEY%"=="" (
     -e ENABLE_SMART_FRAMING=true ^
     -e ASPECT_RATIO=9:16 ^
     -e MPLCONFIGDIR=/tmp/matplotlib ^
+    -e AWS_DEFAULT_REGION=us-east-1 ^
+    -e AWS_REGION=us-east-1 ^
     --entrypoint python ^
     opus-process-clip:local-test ^
     /var/task/test-local.py
@@ -71,6 +73,8 @@ if "%GROQ_API_KEY%"=="" (
     -e ENABLE_SMART_FRAMING=true ^
     -e ASPECT_RATIO=9:16 ^
     -e MPLCONFIGDIR=/tmp/matplotlib ^
+    -e AWS_DEFAULT_REGION=us-east-1 ^
+    -e AWS_REGION=us-east-1 ^
     -e GROQ_API_KEY=%GROQ_API_KEY% ^
     --entrypoint python ^
     opus-process-clip:local-test ^

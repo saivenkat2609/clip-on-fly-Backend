@@ -68,7 +68,7 @@ def process_clip_with_smart_framing(
     # OPTIMIZE: Limit keyframes to prevent FFmpeg expression overflow
     crop_timeline = optimize_crop_timeline(
         crop_timeline,
-        max_keyframes=50,  # FFmpeg limit for nested expressions
+        max_keyframes=30,  # Reduced from 50 to 30 for faster processing
         preserve_transcript_keyframes=True
     )
 
@@ -84,11 +84,11 @@ def process_clip_with_smart_framing(
     )
     filters.append(crop_filter)
 
-    # 2. Scale to target dimensions with Lanczos (sharper than default)
-    # flags=lanczos provides better quality scaling (sharper edges)
-    scale_filter = f"scale={target_w}:{target_h}:flags=lanczos"
+    # 2. Scale to target dimensions with bilinear (faster than lanczos)
+    # flags=bilinear provides fast scaling (optimized for speed)
+    scale_filter = f"scale={target_w}:{target_h}:flags=bilinear"
     filters.append(scale_filter)
-    print(f"[FFmpegSmartCrop] Using Lanczos scaling for sharper output")
+    print(f"[FFmpegSmartCrop] Using bilinear scaling for faster processing")
 
     # 3. Stabilization (optional)
     if stabilize:
@@ -179,10 +179,13 @@ def generate_timeline_crop_expression(
     clip_start: float
 ) -> str:
     """
-    Generate timeline-based crop expression using FFmpeg's 'between' function.
+    Generate timeline-based crop expression with SMOOTH LINEAR INTERPOLATION.
+
+    NEW APPROACH: Uses linear interpolation between keyframes for smooth transitions
+    instead of hard cuts. This eliminates jerky motion.
 
     Example output:
-        crop=w=1080:h=1920:x='if(between(t,0,5),540,if(between(t,5,10),640,740))':y='...'
+        crop=w=1080:h=1920:x='lerp(t,...)':y='lerp(t,...)'
 
     Args:
         crop_timeline: Crop keyframes
@@ -191,34 +194,86 @@ def generate_timeline_crop_expression(
         clip_start: Clip start time
 
     Returns:
-        FFmpeg crop filter with time-based expressions
+        FFmpeg crop filter with smooth interpolation
     """
-    # Build time-based if expressions
-    x_conditions = []
-    y_conditions = []
+    # Build smooth interpolation expressions using piecewise linear interpolation
+    x_expr = build_smooth_interpolation_expression(
+        [(crop['timestamp'], crop['crop_x']) for crop in crop_timeline],
+        crop_timeline[0]['crop_x']
+    )
+    y_expr = build_smooth_interpolation_expression(
+        [(crop['timestamp'], crop['crop_y']) for crop in crop_timeline],
+        crop_timeline[0]['crop_y']
+    )
 
-    for i, crop in enumerate(crop_timeline):
-        # Adjust timestamp relative to clip start
-        start_time = crop['timestamp']
-
-        # Determine end time for this segment
-        if i + 1 < len(crop_timeline):
-            end_time = crop_timeline[i + 1]['timestamp']
-        else:
-            end_time = start_time + 999  # Large value for last segment
-
-        # Create condition: between(t, start, end)
-        condition = f"between(t,{start_time:.2f},{end_time:.2f})"
-
-        x_conditions.append((condition, crop['crop_x']))
-        y_conditions.append((condition, crop['crop_y']))
-
-    # Build nested if expressions
-    x_expr = build_nested_if_expression(x_conditions, crop_timeline[0]['crop_x'])
-    y_expr = build_nested_if_expression(y_conditions, crop_timeline[0]['crop_y'])
-
-    # FFmpeg crop filter
+    # FFmpeg crop filter with smooth interpolation
     return f"crop=w={crop_w}:h={crop_h}:x='{x_expr}':y='{y_expr}'"
+
+
+def build_smooth_interpolation_expression(
+    keyframes: List[Tuple[float, int]],
+    default_value: int
+) -> str:
+    """
+    Build smooth piecewise linear interpolation expression for FFmpeg.
+
+    Uses linear interpolation (lerp) between keyframes for smooth transitions.
+    Formula: lerp(t, t1, t2, val1, val2) = val1 + (val2-val1) * (t-t1)/(t2-t1)
+
+    Args:
+        keyframes: List of (timestamp, value) tuples
+        default_value: Fallback value
+
+    Returns:
+        FFmpeg expression with smooth interpolation
+    """
+    if not keyframes:
+        return str(default_value)
+
+    if len(keyframes) == 1:
+        return str(keyframes[0][1])
+
+    # Sort by timestamp
+    keyframes = sorted(keyframes, key=lambda x: x[0])
+
+    # Build piecewise linear interpolation
+    # For each segment between keyframes, use: val1 + (val2-val1) * (t-t1)/(t2-t1)
+    segments = []
+
+    for i in range(len(keyframes) - 1):
+        t1, val1 = keyframes[i]
+        t2, val2 = keyframes[i + 1]
+
+        # Skip if time interval is zero
+        if abs(t2 - t1) < 0.01:
+            continue
+
+        # Linear interpolation formula
+        # lerp = val1 + (val2 - val1) * ((t - t1) / (t2 - t1))
+        val_diff = val2 - val1
+        time_diff = t2 - t1
+
+        if val_diff == 0:
+            # No change in value - use constant
+            segment_expr = str(val1)
+        else:
+            # Linear interpolation
+            segment_expr = f"{val1}+({val_diff})*((t-{t1:.2f})/{time_diff:.2f})"
+
+        # Apply this segment only between t1 and t2
+        condition = f"between(t,{t1:.2f},{t2:.2f})"
+        segments.append((condition, segment_expr))
+
+    # Add final segment (after last keyframe - hold constant)
+    last_t, last_val = keyframes[-1]
+    segments.append((f"gte(t,{last_t:.2f})", str(last_val)))
+
+    # Build nested if expression
+    expr = str(keyframes[0][1])  # Default to first value
+    for condition, segment_expr in reversed(segments):
+        expr = f"if({condition},{segment_expr},{expr})"
+
+    return expr
 
 
 def build_nested_if_expression(
@@ -284,12 +339,11 @@ def build_ffmpeg_command(
         '-vf', filter_complex,            # Video filters
         '-c:v', 'libx264',               # Video codec
         '-preset', preset,                # Encoding preset
-        '-crf', '20',                     # Quality (18-28, lower = better)
+        '-crf', '30',                     # Quality (18-28, lower = better) - optimized for speed
+        '-tune', 'fastdecode',           # Optimize for fast decoding
         '-pix_fmt', 'yuv420p',           # Pixel format (maximum compatibility)
-        '-c:a', 'aac',                   # Audio codec
-        '-b:a', '128k',                  # Audio bitrate
-        '-ar', '44100',                  # Audio sample rate
-        '-ac', '2',                      # Audio channels (stereo)
+        '-c:a', 'aac',                   # AAC audio codec (compatible, fast)
+        '-b:a', '128k',                  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024', # Prevent muxing errors
         '-movflags', '+faststart',       # Web-optimized MP4
         '-threads', '0',                 # Use all CPU threads

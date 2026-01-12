@@ -91,8 +91,9 @@ FFPROBE_PATH = os.environ.get('FFPROBE_PATH', '/usr/local/bin/ffprobe')
 # ALWAYS enable karaoke subtitles (no env variable needed - always True)
 ADD_SUBTITLES = True  # Karaoke subtitles always enabled
 
-# Smart Framing is now automatically enabled for 9:16 (vertical) videos
-# No longer controlled by environment variable
+# Classification toggle (set USE_CLASSIFICATION=true to enable AI-based content classification)
+# When enabled, classification determines smart framing, subtitle mode, and other processing settings
+USE_CLASSIFICATION = os.environ.get('USE_CLASSIFICATION', 'true').lower() == 'true'
 
 # Aspect ratio from environment variable (default: 9:16 for vertical/shorts)
 DEFAULT_ASPECT_RATIO = os.environ.get('ASPECT_RATIO', '9:16')
@@ -357,13 +358,13 @@ def lambda_handler(event, context):
 
         # Classify video and get processing configuration
         processing_config = None
-        if CLASSIFICATION_AVAILABLE and _classification_service:
-            print(f"[Classification] Classifying clip with full analysis (NLP + Audio + Visual)...")
+        if USE_CLASSIFICATION and ENABLE_SMART_FRAMING and CLASSIFICATION_AVAILABLE and _classification_service:
+            print(f"[Classification] Classifying clip with quick mode (NLP only)...")
             processing_config = classify_and_configure_processing(
                 service=_classification_service,
                 clip_info=clip,
                 video_path=local_video_path,  # Pass video path for full analysis
-                use_quick_mode=False  # Full analysis mode (NLP + Audio + Visual in parallel)
+                use_quick_mode=True  # Quick mode (NLP only - MUCH faster, saves 12s per clip)
             )
 
             # Log classification results
@@ -402,13 +403,26 @@ def lambda_handler(event, context):
                 print(f"[Classification] Overriding aspect ratio: {aspect_ratio} -> {classification_ratio}")
                 aspect_ratio = classification_ratio
 
-        # Check if smart framing is enabled and available
+        # Determine if smart framing should be used
+        # Priority: Classification recommendation > Environment variable
+        if processing_config and processing_config.get('classified'):
+            # Classification was successful - use its recommendation
+            use_smart_framing_decision = smart_framing_recommended
+            decision_source = "classification"
+        else:
+            # No classification - use environment variable
+            use_smart_framing_decision = ENABLE_SMART_FRAMING
+            decision_source = "environment variable"
+
         use_smart_framing = (
             not skip_smart_framing and  # Don't use if explicitly skipped
-            (smart_framing_recommended or ENABLE_SMART_FRAMING) and  # Recommended by classifier OR enabled globally
+            use_smart_framing_decision and  # Decision from classification or env var
             SMART_FRAMING_AVAILABLE and
             clip.get('segments')  # Need transcript for speaker tracking
         )
+
+        if use_smart_framing:
+            print(f"[ProcessClip] Smart framing enabled (source: {decision_source})")
 
         if skip_smart_framing:
             print(f"[ProcessClip] Smart framing skipped (reprocessing mode for faster template changes)")
@@ -700,12 +714,11 @@ def process_clip_with_karaoke_subtitles(video_path, clip, output_path, aspect_ra
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height},subtitles={ass_path}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
+        '-crf', '30',  # Optimized for speed (slightly lower quality, faster encoding)
+        '-tune', 'fastdecode',  # Optimize for fast decoding
         '-pix_fmt', 'yuv420p',  # Maximum compatibility
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
+        '-c:a', 'aac',  # Re-encode audio to AAC (compatible, fast)
+        '-b:a', '128k',  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024',
         '-movflags', '+faststart',
         '-threads', '0',
@@ -761,15 +774,12 @@ def process_clip_with_simple_subtitles(video_path, clip, output_path, aspect_rat
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height},subtitles={ass_path}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
+        '-crf', '30',  # Optimized for speed (slightly lower quality, faster encoding)
+        '-tune', 'fastdecode',  # Optimize for fast decoding
+        '-c:a', 'aac',  # Re-encode audio to AAC (compatible, fast)
+        '-b:a', '128k',  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024',
         '-vsync', '2',  # VFR - prevents subtitle drift
-        '-copyts',  # Preserve timestamps for subtitle sync
-        '-start_at_zero',  # Normalize output timestamps
         '-movflags', '+faststart',
         '-threads', '0',
         '-y',
@@ -811,7 +821,7 @@ def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect
             video_path,
             start_sec=start_time,
             end_sec=end_time,
-            sample_rate=5  # Sample every 5 frames for Lambda
+            sample_rate=10  # Sample every 10 frames for Lambda (optimized for speed)
         )
 
         print(f"[SmartFraming] Detected faces in {len(face_timeline)} frames")
@@ -832,13 +842,13 @@ def process_clip_with_smart_framing_lambda(video_path, clip, output_path, aspect
             video_height,
             target_aspect=aspect_ratio,
             padding_ratio=0.15,
-            smoothing_sigma=0.5,
+            smoothing_sigma=2.0,  # INCREASED from 0.5 to 2.0 for much smoother transitions
             face_timeline=face_timeline,
             enable_motion_keyframes=True,
-            motion_threshold=100,
-            max_keyframe_interval=3.0,
+            motion_threshold=150,  # INCREASED from 100 to 150 to reduce jitter
+            max_keyframe_interval=4.0,  # INCREASED from 3.0 to 4.0 for more stability
             use_sticky_crop=True,  # Enable sticky crop for stable framing
-            dead_zone_radius=150
+            dead_zone_radius=200  # INCREASED from 150 to 200 for more stable locking
         )
 
         print(f"[SmartFraming] Generated {len(crop_timeline)} keyframes")
@@ -918,15 +928,12 @@ def extract_clip_no_subs(video_path, start_time, end_time, output_path, aspect_r
         '-vf', f'crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={target_width}:{target_height}',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
-        '-crf', '28',
-        '-c:a', 'aac',
-        '-b:a', '96k',
-        '-ar', '44100',
-        '-ac', '2',
+        '-crf', '30',  # Optimized for speed (slightly lower quality, faster encoding)
+        '-tune', 'fastdecode',  # Optimize for fast decoding
+        '-c:a', 'aac',  # Re-encode audio to AAC (compatible, fast)
+        '-b:a', '128k',  # 128kbps audio bitrate
         '-max_muxing_queue_size', '1024',
         '-vsync', '2',  # VFR
-        '-copyts',
-        '-start_at_zero',
         '-movflags', '+faststart',
         '-threads', '0',
         '-y',

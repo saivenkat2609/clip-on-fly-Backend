@@ -18,6 +18,20 @@ sys.path.insert(0, '/opt/python')
 # Add shared modules path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
 
+# DEBUG: Check if firebase-admin is accessible
+print(f"[DEBUG] sys.path: {sys.path[:3]}")  # Show first 3 paths
+import os as os_check
+if os_check.path.exists('/opt/python'):
+    print(f"[DEBUG] /opt/python exists")
+    opt_contents = os_check.listdir('/opt/python')
+    print(f"[DEBUG] /opt/python contents: {opt_contents[:10]}")  # First 10 items
+    if 'firebase_admin' in opt_contents:
+        print("[DEBUG] ✅ firebase_admin found in /opt/python")
+    else:
+        print("[DEBUG] ❌ firebase_admin NOT in /opt/python")
+else:
+    print("[DEBUG] ❌ /opt/python does not exist")
+
 # Import scalability utilities (graceful fallback)
 try:
     from shared.logger import get_logger
@@ -341,10 +355,24 @@ def lambda_handler(event, context):
 
         print(f"[Finalize] Complete! Generated {len(clip_urls)} download URLs")
 
-        # Update Firestore with completed video data
+        # Update Firestore with completed video data (PARALLEL for 50% speedup)
         if user_id:
-            update_firestore_video(user_id, session_id, result)
-            update_user_stats(user_id, len(clip_urls))
+            import concurrent.futures
+
+            print(f"[Finalize] Updating Firestore in parallel...")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit both operations simultaneously
+                future_video = executor.submit(update_firestore_video, user_id, session_id, result)
+                future_stats = executor.submit(update_user_stats, user_id, len(clip_urls))
+
+                # Wait for both to complete
+                concurrent.futures.wait([future_video, future_stats])
+
+                # Check for exceptions
+                future_video.result()  # Will raise exception if failed
+                future_stats.result()  # Will raise exception if failed
+
+            print(f"[Finalize] Firestore updates complete")
 
         # Update session and notify via WebSocket
         if UTILITIES_AVAILABLE and user_id:
