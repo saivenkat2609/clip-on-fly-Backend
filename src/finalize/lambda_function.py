@@ -45,10 +45,11 @@ except ImportError as e:
     UTILITIES_AVAILABLE = False
 
 # HIGH PRIORITY FIX #9: Import Firebase Admin SDK-based Firestore client
+# RESILIENCE UPDATE: Now includes retry logic with exponential backoff
 try:
-    from shared.firestore_client import get_firestore_client
+    from shared.firestore_client import get_firestore_client, update_video_completion_with_clips
     FIRESTORE_CLIENT_AVAILABLE = True
-    print("[Finalize] Firestore Admin SDK client loaded successfully")
+    print("[Finalize] Firestore Admin SDK client loaded successfully (with retry logic)")
 except ImportError as e:
     print(f"[Finalize] Warning: Firestore client not available: {str(e)}")
     FIRESTORE_CLIENT_AVAILABLE = False
@@ -109,15 +110,20 @@ def update_firestore_video(user_id, session_id, data):
 
         # Build update data
         update_data = {
-            'status': data.get('status', 'completed'),
+            'status': 'completed',  # ALWAYS set to completed when finalize runs
             'completedAt': datetime.utcnow()
         }
+
+        print(f"[Firestore] Setting status to: completed")
+        print(f"[Firestore] Clips in data: {len(data.get('clips', []))}")
 
         # Add clips data
         if "clips" in data and data["clips"]:
             clips_array = []
             # Calculate expiry: 3 days from now
             expiry_time = datetime.utcnow() + timedelta(days=3)
+
+            print(f"[Firestore] Processing {len(data['clips'])} clips for Firestore update")
 
             for clip in data["clips"]:
                 clip_obj = {
@@ -150,6 +156,10 @@ def update_firestore_video(user_id, session_id, data):
                 clips_array.append(clip_obj)
 
             update_data["clips"] = clips_array
+            print(f"[Firestore] Built clips array with {len(clips_array)} clips")
+            print(f"[Firestore] First clip structure: {clips_array[0] if clips_array else 'No clips'}")
+        else:
+            print(f"[Firestore] WARNING: No clips data found in result!")
 
         # Add video info if present
         if "video_info" in data and data["video_info"]:
@@ -166,13 +176,21 @@ def update_firestore_video(user_id, session_id, data):
             update_data["status"] = "failed"
 
         # Update document (merge with existing fields)
+        print(f"[Firestore] Attempting to update document: users/{user_id}/videos/{session_id}")
+        print(f"[Firestore] Update data keys: {list(update_data.keys())}")
+        print(f"[Firestore] Status value: {update_data.get('status')}")
+        print(f"[Firestore] Clips count: {len(update_data.get('clips', []))}")
+
         doc_ref.set(update_data, merge=True)
-        print(f"[Firestore] ✓ Successfully updated video {session_id}")
+        print(f"[Firestore] ✓ Successfully updated video {session_id} with status={update_data['status']} and {len(update_data.get('clips', []))} clips")
 
     except Exception as e:
-        print(f"[Firestore] Error updating document: {str(e)}")
+        print(f"[Firestore] ❌ Error updating document: {str(e)}")
+        print(f"[Firestore] User ID: {user_id}, Session ID: {session_id}")
         import traceback
         traceback.print_exc()
+        # Re-raise to make the error visible
+        raise Exception(f"Firestore update failed: {str(e)}")
 
 
 def update_user_stats(user_id, total_clips):
@@ -355,24 +373,78 @@ def lambda_handler(event, context):
 
         print(f"[Finalize] Complete! Generated {len(clip_urls)} download URLs")
 
-        # Update Firestore with completed video data (PARALLEL for 50% speedup)
-        if user_id:
+        # Update Firestore with completed video data (WITH RETRY LOGIC)
+        # RESILIENCE UPDATE: Now uses retry-enabled function with exponential backoff (2s, 4s, 8s)
+        if user_id and FIRESTORE_CLIENT_AVAILABLE:
             import concurrent.futures
 
-            print(f"[Finalize] Updating Firestore in parallel...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                # Submit both operations simultaneously
-                future_video = executor.submit(update_firestore_video, user_id, session_id, result)
-                future_stats = executor.submit(update_user_stats, user_id, len(clip_urls))
+            print(f"[Finalize] ====== STARTING FIRESTORE UPDATE (WITH RETRY LOGIC) ======")
+            print(f"[Finalize] User ID: {user_id}")
+            print(f"[Finalize] Session ID: {session_id}")
+            print(f"[Finalize] Total clips to save: {len(clip_urls)}")
+            print(f"[Finalize] Result status: {result['status']}")
 
-                # Wait for both to complete
-                concurrent.futures.wait([future_video, future_stats])
+            # Use the new retry-enabled function
+            try:
+                # Update video status and clips with retry logic (3 attempts: 0s, 2s, 4s delay)
+                success = update_video_completion_with_clips(
+                    user_id=user_id,
+                    session_id=session_id,
+                    clips=clip_urls,
+                    video_info=video_info
+                )
 
-                # Check for exceptions
-                future_video.result()  # Will raise exception if failed
-                future_stats.result()  # Will raise exception if failed
+                if success:
+                    print(f"[Finalize] ✓ Video document updated successfully (with retry protection)")
 
-            print(f"[Finalize] Firestore updates complete")
+                    # Update user stats (non-critical, don't fail if this errors)
+                    try:
+                        update_user_stats(user_id, len(clip_urls))
+                        print(f"[Finalize] ✓ User stats updated successfully")
+                    except Exception as stats_err:
+                        print(f"[Finalize] ⚠️ User stats update failed (non-critical): {str(stats_err)}")
+                else:
+                    # Firestore update failed after all retries
+                    print(f"[Finalize] ❌ Firestore update FAILED after all retries")
+                    print(f"[Finalize] ⚠️ Clips are saved to S3 at: {result_key}")
+                    print(f"[Finalize] ⚠️ Reconciliation Lambda will auto-fix this within 5 minutes")
+
+                    # Emit CloudWatch alarm metric for monitoring
+                    try:
+                        import boto3
+                        cloudwatch = boto3.client('cloudwatch')
+                        cloudwatch.put_metric_data(
+                            Namespace='OpusClip/Finalize',
+                            MetricData=[
+                                {
+                                    'MetricName': 'FirestoreSyncFailure',
+                                    'Value': 1,
+                                    'Unit': 'Count',
+                                    'Dimensions': [
+                                        {'Name': 'SessionId', 'Value': session_id[:8]}  # First 8 chars
+                                    ]
+                                }
+                            ]
+                        )
+                        print(f"[Finalize] ⚠️ Emitted CloudWatch alarm: FirestoreSyncFailure")
+                    except Exception as metric_err:
+                        print(f"[Finalize] Warning: Failed to emit alarm: {metric_err}")
+
+                    # DON'T raise exception - Lambda should succeed even if Firestore fails
+                    # The reconciliation Lambda will fix this automatically
+
+            except Exception as firestore_err:
+                print(f"[Finalize] ❌ Unexpected Firestore error: {str(firestore_err)}")
+                print(f"[Finalize] ⚠️ Clips are saved to S3, will be auto-reconciled")
+                import traceback
+                traceback.print_exc()
+                # Don't fail the Lambda - clips are in S3
+
+            print(f"[Finalize] ====== FIRESTORE UPDATES COMPLETE ======")
+        elif not user_id:
+            print(f"[Finalize] ⚠️  WARNING: No user_id provided, skipping Firestore update!")
+        else:
+            print(f"[Finalize] ⚠️  WARNING: Firestore client not available, skipping update")
 
         # Update session and notify via WebSocket
         if UTILITIES_AVAILABLE and user_id:

@@ -8,6 +8,8 @@ import uuid
 import os
 import re
 import sys
+import subprocess
+import time
 
 # Add shared directory to Python path for imports
 sys.path.insert(0, '/opt/python')
@@ -19,6 +21,13 @@ try:
 except ImportError as e:
     print(f"[API] Warning: Rate limiter not available: {e}")
     RATE_LIMITING_ENABLED = False
+
+try:
+    from dynamodb_client import update_video_session
+    DYNAMODB_ENABLED = True
+except ImportError as e:
+    print(f"[API] Warning: DynamoDB client not available: {e}")
+    DYNAMODB_ENABLED = False
 
 stepfunctions = boto3.client('stepfunctions')
 def get_storage_client():
@@ -104,6 +113,149 @@ def validate_youtube_url(url):
 
     return False
 
+
+def fetch_youtube_metadata(youtube_url: str) -> dict:
+    """
+    Fetch YouTube video metadata using yt-dlp before processing.
+    This provides immediate feedback to users about video availability and duration.
+
+    Args:
+        youtube_url: YouTube video URL
+
+    Returns:
+        dict: Video metadata with keys: title, duration, is_available, error
+
+    Raises:
+        Exception: If metadata fetching fails after retries
+    """
+    print(f"[API-Gateway] Fetching metadata for URL: {youtube_url}")
+    start_time = time.time()
+
+    # Path to yt-dlp binary (from Lambda layer)
+    ytdlp_path = '/opt/bin/yt-dlp'
+
+    # Check if yt-dlp exists
+    if not os.path.exists(ytdlp_path):
+        print("[API-Gateway] ERROR: yt-dlp binary not found in Lambda layer")
+        raise Exception("Video validation not available - yt-dlp layer not attached")
+
+    # Build yt-dlp command for metadata extraction only
+    info_cmd = [
+        ytdlp_path,
+        '--dump-json',            # Output video info as JSON
+        '--no-playlist',          # Don't download playlists
+        '--no-check-formats',     # Skip format availability check (faster)
+        '--skip-download',        # Don't download video
+        '--remote-components', 'ejs:github',  # Use GitHub for remote components
+    ]
+
+    # Try to use cookies for restricted videos
+    cookies_path = '/tmp/youtube_cookies.txt'
+    if os.path.exists(cookies_path):
+        info_cmd.extend(['--cookies', cookies_path])
+        print("[API-Gateway] Using cookies for validation")
+    else:
+        # Fallback to Android client (works without cookies)
+        info_cmd.extend(['--extractor-args', 'youtube:player_client=android'])
+        info_cmd.extend(['--user-agent', 'com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip'])
+
+    info_cmd.append(youtube_url)
+
+    try:
+        # Run yt-dlp with 15-second timeout (faster than download Lambda's 45s)
+        info_result = subprocess.run(
+            info_cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=15
+        )
+
+        elapsed = time.time() - start_time
+        print(f"[API-Gateway] Metadata fetched in {elapsed:.2f}s")
+
+        # Parse JSON output
+        video_data = json.loads(info_result.stdout)
+
+        metadata = {
+            'title': video_data.get('title', 'Unknown'),
+            'duration': video_data.get('duration', 0),
+            'is_available': True,
+            'error': None
+        }
+
+        print(f"[API-Gateway] Video: '{metadata['title']}' - Duration: {metadata['duration']}s")
+        return metadata
+
+    except subprocess.TimeoutExpired:
+        print("[API-Gateway] Metadata fetch timeout after 15s")
+        return {
+            'title': 'Unknown',
+            'duration': 0,
+            'is_available': False,
+            'error': 'Video validation timeout - please try again'
+        }
+    except subprocess.CalledProcessError as e:
+        error_msg = e.stderr if e.stderr else str(e)
+        print(f"[API-Gateway] yt-dlp error: {error_msg}")
+
+        # Check for common errors
+        if 'Private video' in error_msg or 'This video is private' in error_msg:
+            return {'title': 'Unknown', 'duration': 0, 'is_available': False, 'error': 'Video is private'}
+        elif 'Video unavailable' in error_msg or 'This video is unavailable' in error_msg:
+            return {'title': 'Unknown', 'duration': 0, 'is_available': False, 'error': 'Video is unavailable'}
+        elif 'removed' in error_msg.lower():
+            return {'title': 'Unknown', 'duration': 0, 'is_available': False, 'error': 'Video has been removed'}
+        else:
+            return {'title': 'Unknown', 'duration': 0, 'is_available': False, 'error': 'Unable to access video'}
+    except json.JSONDecodeError as e:
+        print(f"[API-Gateway] JSON decode error: {str(e)}")
+        return {
+            'title': 'Unknown',
+            'duration': 0,
+            'is_available': False,
+            'error': 'Failed to parse video information'
+        }
+    except Exception as e:
+        print(f"[API-Gateway] Unexpected error: {str(e)}")
+        return {
+            'title': 'Unknown',
+            'duration': 0,
+            'is_available': False,
+            'error': f'Validation failed: {str(e)}'
+        }
+
+
+def validate_video_metadata(metadata: dict) -> tuple:
+    """
+    Validate video metadata against platform requirements.
+
+    Args:
+        metadata: Video metadata dict with 'duration' and 'is_available' keys
+
+    Returns:
+        tuple: (is_valid: bool, error_message: str or None)
+    """
+    # Check if video is available
+    if not metadata.get('is_available', False):
+        error = metadata.get('error', 'Video not available')
+        return False, error
+
+    duration = metadata.get('duration', 0)
+
+    # Check minimum duration: 30 seconds
+    if duration < 30:
+        return False, f"Video too short (minimum 30 seconds, got {duration} seconds)"
+
+    # Check maximum duration: 1 hour (3600 seconds)
+    if duration > 3600:
+        minutes = int(duration / 60)
+        return False, f"Video too long (maximum 60 minutes, got {minutes} minutes)"
+
+    # All checks passed
+    return True, None
+
+
 def lambda_handler(event, context):
     """
     API Gateway Lambda handler
@@ -112,6 +264,7 @@ def lambda_handler(event, context):
     - POST /process: Start video processing
     - GET /status/{session_id}: Get processing status
     - GET /result/{session_id}: Get final result
+    - GET /validate-youtube: Validate YouTube URL (availability, duration, credits)
     """
 
     http_method = event.get('httpMethod', event.get('requestContext', {}).get('http', {}).get('method', 'GET'))
@@ -145,6 +298,8 @@ def lambda_handler(event, context):
         return handle_result(event, path)
     elif http_method == 'GET' and '/user/' in path and '/videos' in path:
         return handle_user_videos(event, path)
+    elif http_method == 'GET' and path == '/validate-youtube':
+        return handle_validate_youtube(event)
     else:
         return {
             'statusCode': 404,
@@ -211,6 +366,37 @@ def handle_process(event):
                 })
             }
 
+        # NEW: Fetch and validate video metadata BEFORE starting processing
+        print(f"[API] Validating video metadata for: {youtube_url}")
+        try:
+            metadata = fetch_youtube_metadata(youtube_url)
+            is_valid, error_msg = validate_video_metadata(metadata)
+
+            if not is_valid:
+                print(f"[API] Video validation failed: {error_msg}")
+                return {
+                    'statusCode': 400,
+                    'headers': get_cors_headers(),
+                    'body': json.dumps({
+                        'error': error_msg,
+                        'video_title': metadata.get('title', 'Unknown'),
+                        'video_duration': metadata.get('duration', 0)
+                    })
+                }
+
+            print(f"[API] Video validated successfully: '{metadata['title']}' ({metadata['duration']}s)")
+
+        except Exception as e:
+            print(f"[API] Metadata validation error: {str(e)}")
+            return {
+                'statusCode': 400,
+                'headers': get_cors_headers(),
+                'body': json.dumps({
+                    'error': 'Unable to validate YouTube video. Please check the URL and try again.',
+                    'details': str(e)
+                })
+            }
+
         # Generate session ID
         session_id = str(uuid.uuid4())
 
@@ -241,13 +427,26 @@ def handle_process(event):
             })
         )
 
+        # Store execution ARN internally for debugging (not exposed to client)
+        if DYNAMODB_ENABLED:
+            try:
+                update_video_session(
+                    user_id=user_id,
+                    session_id=session_id,
+                    execution_arn=execution['executionArn'],
+                    status='processing'
+                )
+                print(f"[API] Stored execution ARN in DynamoDB for session: {session_id}")
+            except Exception as db_error:
+                print(f"[API] Warning: Failed to store execution ARN in DynamoDB: {str(db_error)}")
+
         return {
             'statusCode': 202,
             'headers': get_cors_headers(),
             'body': json.dumps({
                 'session_id': session_id,
-                'status': 'processing',
-                'execution_arn': execution['executionArn']
+                'status': 'processing'
+                # execution_arn removed for security - stored in DynamoDB for internal tracking
             })
         }
 
@@ -385,6 +584,12 @@ def handle_result(event, path):
             'headers': get_cors_headers(),
             'body': json.dumps({'error': str(e)})
         }
+
+
+def handle_validate_youtube(event):
+    """Handle GET /validate-youtube - Validate YouTube URL (availability, duration, credits)"""
+    from validate_youtube_endpoint import lambda_handler as validate_youtube_handler
+    return validate_youtube_handler(event, None)
 
 
 def handle_reprocess_clip(event):

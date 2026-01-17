@@ -76,7 +76,8 @@ def update_video_session(user_id: str, session_id: str, **kwargs) -> bool:
     Args:
         user_id: User identifier
         session_id: Session identifier
-        **kwargs: Attributes to update
+        **kwargs: Attributes to update (e.g., status, execution_arn, error_message, etc.)
+                  Note: execution_arn is stored internally for debugging but not exposed to clients
 
     Returns:
         True if successful, False otherwise

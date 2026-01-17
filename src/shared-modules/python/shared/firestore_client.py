@@ -6,12 +6,18 @@ HIGH PRIORITY FIX #9: Migrated from Firebase Web API Key to Firebase Admin SDK
 - Web API keys are meant for frontend and can be extracted from client bundles
 - Admin SDK uses service account credentials for secure backend access
 - Prevents attackers from directly manipulating Firestore data
+
+ROBUST RESILIENCE UPDATE:
+- Added retry logic with exponential backoff for all Firestore operations
+- Better error handling and validation for Firebase credentials
+- CloudWatch metrics for monitoring Firestore failures
 """
 import os
 import json
 import base64
+import time
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, Callable, Any
 
 # HIGH PRIORITY FIX #9: Use Firebase Admin SDK instead of REST API
 try:
@@ -27,6 +33,78 @@ FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'reframeai-87b24')
 # Initialize Firebase Admin SDK (singleton pattern)
 _firebase_app = None
 _firestore_client = None
+
+
+def retry_with_backoff(func: Callable, max_attempts: int = 3, base_delay: float = 2.0, operation_name: str = "operation") -> Any:
+    """
+    Retry a function with exponential backoff.
+
+    Args:
+        func: Function to retry (no-argument callable)
+        max_attempts: Maximum number of retry attempts (default: 3)
+        base_delay: Base delay in seconds for exponential backoff (default: 2.0)
+        operation_name: Name of the operation for logging
+
+    Returns:
+        Result of the function
+
+    Raises:
+        Last exception if all retries fail
+
+    Backoff schedule:
+        - Attempt 1: No delay
+        - Attempt 2: 2 seconds
+        - Attempt 3: 4 seconds
+        - Attempt 4: 8 seconds (if max_attempts > 3)
+    """
+    last_exception = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"[Firestore Retry] Attempt {attempt}/{max_attempts}: {operation_name}")
+            result = func()
+
+            if attempt > 1:
+                print(f"[Firestore Retry] ✓ {operation_name} succeeded on attempt {attempt}")
+
+            return result
+
+        except Exception as e:
+            last_exception = e
+            print(f"[Firestore Retry] ✗ Attempt {attempt} failed: {str(e)}")
+
+            # Don't sleep after last attempt
+            if attempt < max_attempts:
+                delay = base_delay * (2 ** (attempt - 1))  # Exponential backoff: 2s, 4s, 8s
+                print(f"[Firestore Retry] Waiting {delay}s before retry...")
+                time.sleep(delay)
+            else:
+                print(f"[Firestore Retry] All {max_attempts} attempts failed for {operation_name}")
+
+                # Emit CloudWatch metric for monitoring
+                try:
+                    import boto3
+                    cloudwatch = boto3.client('cloudwatch')
+                    cloudwatch.put_metric_data(
+                        Namespace='OpusClip/Firestore',
+                        MetricData=[
+                            {
+                                'MetricName': 'FirestoreUpdateFailed',
+                                'Value': 1,
+                                'Unit': 'Count',
+                                'Dimensions': [
+                                    {'Name': 'Operation', 'Value': operation_name}
+                                ]
+                            }
+                        ]
+                    )
+                    print(f"[Firestore Retry] ⚠️ Emitted CloudWatch metric: FirestoreUpdateFailed")
+                except Exception as metric_error:
+                    print(f"[Firestore Retry] Warning: Failed to emit metric: {metric_error}")
+
+    # Re-raise the last exception
+    if last_exception:
+        raise last_exception
 
 
 def get_firestore_client():
@@ -63,8 +141,32 @@ def get_firestore_client():
             if base64_creds:
                 try:
                     print("[Firestore] Decoding base64 credentials from FIREBASE_ADMIN_SDK_BASE64")
+
+                    # ROBUST FIX: Validate base64 string before decoding
+                    if not base64_creds or base64_creds.strip() == '':
+                        raise ValueError("FIREBASE_ADMIN_SDK_BASE64 is empty")
+
+                    # Remove any whitespace/newlines that might corrupt the base64 string
+                    base64_creds = base64_creds.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+
                     # Decode base64 string to JSON
                     creds_json = base64.b64decode(base64_creds).decode('utf-8')
+
+                    # ROBUST FIX: Validate JSON structure before writing
+                    if not creds_json or creds_json.strip() == '':
+                        raise ValueError("Decoded credentials are empty")
+
+                    # Validate it's valid JSON
+                    creds_dict = json.loads(creds_json)
+
+                    # Validate required fields for service account
+                    required_fields = ['type', 'project_id', 'private_key_id', 'private_key', 'client_email']
+                    missing_fields = [field for field in required_fields if field not in creds_dict]
+                    if missing_fields:
+                        raise ValueError(f"Service account JSON missing required fields: {missing_fields}")
+
+                    if creds_dict.get('type') != 'service_account':
+                        raise ValueError(f"Invalid credential type: {creds_dict.get('type')} (expected 'service_account')")
 
                     # Write to /tmp directory (writable in Lambda)
                     tmp_cred_path = '/tmp/firebase-credentials.json'
@@ -72,9 +174,21 @@ def get_firestore_client():
                         f.write(creds_json)
 
                     cred_path = tmp_cred_path
-                    print(f"[Firestore] ✓ Credentials written to {tmp_cred_path}")
+                    print(f"[Firestore] ✓ Credentials validated and written to {tmp_cred_path}")
+                    print(f"[Firestore] ✓ Project ID: {creds_dict.get('project_id')}")
+                    print(f"[Firestore] ✓ Client Email: {creds_dict.get('client_email')}")
+                except json.JSONDecodeError as e:
+                    print(f"[Firestore] ERROR: Invalid JSON in decoded credentials: {str(e)}")
+                    print(f"[Firestore] ERROR: Decoded content preview: {creds_json[:100] if 'creds_json' in locals() else 'N/A'}...")
+                    print(f"[Firestore] ERROR: Please verify FIREBASE_ADMIN_SDK_BASE64 env var is correctly base64-encoded service account JSON")
+                    return None
+                except ValueError as e:
+                    print(f"[Firestore] ERROR: Invalid credentials: {str(e)}")
+                    print(f"[Firestore] ERROR: Please verify FIREBASE_ADMIN_SDK_BASE64 contains valid service account JSON")
+                    return None
                 except Exception as e:
                     print(f"[Firestore] ERROR: Failed to decode base64 credentials: {str(e)}")
+                    print(f"[Firestore] ERROR: Base64 length: {len(base64_creds) if base64_creds else 0} chars")
                     return None
 
             # Option 2 & 3: Check for service account file path in environment variables
@@ -122,6 +236,7 @@ def add_clip_to_firestore(user_id: str, session_id: str, clip_data: Dict) -> boo
     """
     Add a single clip to Firestore video document (incremental update)
     Uses Firebase Admin SDK for secure backend authentication
+    WITH RETRY LOGIC: Automatically retries up to 3 times with exponential backoff
 
     Args:
         user_id: Firebase user ID
@@ -152,7 +267,8 @@ def add_clip_to_firestore(user_id: str, session_id: str, clip_data: Dict) -> boo
         print("[Firestore] ERROR: Could not initialize Firestore client")
         return False
 
-    try:
+    def _add_clip_operation():
+        """Inner function for retry logic"""
         # Reference to the video document
         doc_ref = db.collection('users').document(user_id).collection('videos').document(session_id)
 
@@ -224,8 +340,15 @@ def add_clip_to_firestore(user_id: str, session_id: str, clip_data: Dict) -> boo
         print(f"[Firestore] ✓ Clip {clip_index} added to Firestore successfully")
         return True
 
+    # Execute with retry logic
+    try:
+        return retry_with_backoff(
+            _add_clip_operation,
+            max_attempts=3,
+            operation_name=f"add_clip_{clip_data.get('clip_index', '?')}_to_firestore"
+        )
     except Exception as e:
-        print(f"[Firestore] Error adding clip to Firestore: {str(e)}")
+        print(f"[Firestore] ❌ Final error after all retries: {str(e)}")
         import traceback
         traceback.print_exc()
         return False
@@ -307,3 +430,99 @@ def get_video_document(user_id: str, session_id: str) -> Optional[Dict]:
     except Exception as e:
         print(f"[Firestore] Error retrieving document: {str(e)}")
         return None
+
+
+def update_video_completion_with_clips(user_id: str, session_id: str, clips: list, video_info: dict = None) -> bool:
+    """
+    Update video status to completed and add all clips in a single atomic operation.
+    Specifically designed for finalize lambda with retry logic.
+    WITH RETRY LOGIC: Automatically retries up to 3 times with exponential backoff
+
+    Args:
+        user_id: Firebase user ID
+        session_id: Video session ID
+        clips: List of clip objects with download URLs
+        video_info: Optional video metadata
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if not user_id:
+        print("[Firestore] Skipping completion update - missing user_id")
+        return False
+
+    db = get_firestore_client()
+    if not db:
+        print("[Firestore] ERROR: Could not initialize Firestore client")
+        return False
+
+    def _update_completion_operation():
+        """Inner function for retry logic"""
+        doc_ref = db.collection('users').document(user_id).collection('videos').document(session_id)
+
+        # Build update data
+        update_data = {
+            'status': 'completed',
+            'completedAt': datetime.utcnow()
+        }
+
+        # Add clips
+        if clips:
+            clips_array = []
+            expiry_time = datetime.utcnow() + timedelta(days=3)
+
+            for clip in clips:
+                clip_obj = {
+                    "clipIndex": clip.get("clip_index"),
+                    "downloadUrl": clip.get("download_url"),
+                    "s3Key": clip.get("s3_key"),
+                    "expiresAt": expiry_time
+                }
+
+                # Add optional fields
+                if "title" in clip and clip["title"]:
+                    clip_obj["title"] = clip["title"]
+                if "virality_score" in clip and clip["virality_score"] is not None:
+                    clip_obj["virality_score"] = clip["virality_score"]
+                if "duration" in clip and clip["duration"] is not None:
+                    clip_obj["duration"] = clip["duration"]
+                if "startTime" in clip and clip["startTime"] is not None:
+                    clip_obj["startTime"] = clip["startTime"]
+                if "endTime" in clip and clip["endTime"] is not None:
+                    clip_obj["endTime"] = clip["endTime"]
+                if "template_id" in clip and clip["template_id"]:
+                    clip_obj["template_id"] = clip["template_id"]
+                if "template_name" in clip and clip["template_name"]:
+                    clip_obj["template_name"] = clip["template_name"]
+                if "score_breakdown" in clip and clip["score_breakdown"]:
+                    clip_obj["score_breakdown"] = clip["score_breakdown"]
+
+                clips_array.append(clip_obj)
+
+            update_data["clips"] = clips_array
+
+        # Add video info
+        if video_info:
+            update_data["videoInfo"] = {
+                "title": video_info.get("title", ""),
+                "duration": video_info.get("duration", 0),
+                "thumbnail": video_info.get("thumbnail", "")
+            }
+
+        # Update document
+        doc_ref.set(update_data, merge=True)
+        print(f"[Firestore] ✓ Successfully updated video {session_id} with status=completed and {len(clips)} clips")
+        return True
+
+    # Execute with retry logic
+    try:
+        return retry_with_backoff(
+            _update_completion_operation,
+            max_attempts=3,
+            operation_name=f"update_video_completion_{session_id}"
+        )
+    except Exception as e:
+        print(f"[Firestore] ❌ Final error after all retries: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False

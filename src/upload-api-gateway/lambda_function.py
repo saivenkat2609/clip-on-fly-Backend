@@ -21,6 +21,13 @@ except ImportError as e:
     print(f"[API-Upload] Warning: Rate limiter not available: {e}")
     RATE_LIMITING_ENABLED = False
 
+try:
+    from dynamodb_client import update_video_session
+    DYNAMODB_ENABLED = True
+except ImportError as e:
+    print(f"[API-Upload] Warning: DynamoDB client not available: {e}")
+    DYNAMODB_ENABLED = False
+
 stepfunctions = boto3.client('stepfunctions')
 
 def get_storage_client():
@@ -372,14 +379,27 @@ def handle_start_processing(event):
             })
         )
 
+        # Store execution ARN internally for debugging (not exposed to client)
+        if DYNAMODB_ENABLED:
+            try:
+                update_video_session(
+                    user_id=user_id,
+                    session_id=session_id,
+                    execution_arn=execution['executionArn'],
+                    status='processing'
+                )
+                print(f"[API-Upload] Stored execution ARN in DynamoDB for session: {session_id}")
+            except Exception as db_error:
+                print(f"[API-Upload] Warning: Failed to store execution ARN in DynamoDB: {str(db_error)}")
+
         return {
             'statusCode': 202,
             'headers': get_cors_headers(),
             'body': json.dumps({
                 'session_id': session_id,
                 'status': 'processing',
-                'execution_arn': execution['executionArn'],
                 'message': 'Video processing started successfully'
+                # execution_arn removed for security - stored in DynamoDB for internal tracking
             })
         }
 
