@@ -1,0 +1,86 @@
+{
+  "monthlyLimit": 300,
+  "lastReset": "2026-01-18T00:00:00.000Z",
+  "keys": [
+    {
+      "name": "key-1",
+      "apiKey": "4851f7cfd4mshd48600fa805a277p1dc4b1jsn088a52e2e286",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-2",
+      "apiKey": "46e9ae124bmsh69a9fa37f445a60p1a138bjsn3903af2808e1",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-3",
+      "apiKey": "4256436dc3msh1566fe43e687c82p101c16jsn76c7778859e1",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-4",
+      "apiKey": "24e6c2e4d2mshe1b210b1e2e49c7p1bfbf7jsnf83027c69df7",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-5",
+      "apiKey": "REPLACE_WITH_YOUR_RAPIDAPI_KEY_5",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-6",
+      "apiKey": "REPLACE_WITH_YOUR_RAPIDAPI_KEY_6",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-7",
+      "apiKey": "REPLACE_WITH_YOUR_RAPIDAPI_KEY_7",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-8",
+      "apiKey": "REPLACE_WITH_YOUR_RAPIDAPI_KEY_8",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-9",
+      "apiKey": "REPLACE_WITH_YOUR_RAPIDAPI_KEY_9",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    },
+    {
+      "name": "key-10",
+      "apiKey": "REPLACE_WITH_YOUR_RAPIDAPI_KEY_10",
+      "enabled": true,
+      "usedThisMonth": 0,
+      "totalUsed": 0,
+      "lastUsed": null
+    }
+  ]
+}
