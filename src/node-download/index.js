@@ -14,6 +14,26 @@ const { Upload } = require("@aws-sdk/lib-storage");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const https = require("https");
+
+const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+function updateSupabaseStatus(session_id, status) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      const body = JSON.stringify({ status });
+      const url = new URL(`${SUPABASE_URL}/rest/v1/videos?session_id=eq.${encodeURIComponent(session_id)}`);
+      const req = https.request({ hostname: url.hostname, path: url.pathname + url.search, method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          'apikey': SUPABASE_SERVICE_ROLE_KEY, 'Prefer': 'return=minimal', 'Content-Length': Buffer.byteLength(body) }
+      }, () => resolve());
+      req.on('error', (e) => { console.log(`[Supabase] status update failed: ${e.message}`); resolve(); });
+      req.write(body); req.end();
+    } catch (e) { console.log(`[Supabase] status update failed: ${e.message}`); resolve(); }
+  });
+}
 
 // Import scalability utilities (graceful fallback if not available)
 let logger, updateVideoSession, notifyProcessingProgress, trackVideoDownloadTime, UTILITIES_AVAILABLE;
@@ -566,6 +586,7 @@ exports.handler = async (event, context) => {
           current_step: 'Downloading video from YouTube'
         });
         await notifyProcessingProgress(session_id, 'downloading', 5, 'Downloading video...');
+        await updateSupabaseStatus(session_id, 'downloading');
       } catch (e) {
         console.log(`[Download] Warning: Session update failed: ${e.message}`);
       }
@@ -924,6 +945,7 @@ exports.handler = async (event, context) => {
     if (UTILITIES_AVAILABLE) {
       try {
         trackVideoDownloadTime(session_id, Date.now() - startTime);
+        await updateSupabaseStatus(session_id, 'downloaded');
         await updateVideoSession(session_id, payload.user_id || 'unknown', {
           status: 'downloaded',
           current_step: 'Video downloaded successfully',

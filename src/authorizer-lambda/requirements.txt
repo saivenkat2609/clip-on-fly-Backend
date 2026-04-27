@@ -1,8 +1,2 @@
-# HIGH PRIORITY FIX #16: Removed requests library to reduce package size
-# - requests (~500KB) replaced with urllib (built-in)
-# - Reduces Lambda package size by ~1-2 MB (zipped)
-# - Improves cold start time
-
 PyJWT==2.8.0
 cryptography==41.0.7
-# requests==2.31.0  # REMOVED - using urllib.request instead (built-in)

@@ -558,6 +558,18 @@ def lambda_handler(event, context):
         except Exception as cleanup_error:
             print(f"[Transcribe] Warning: Failed to delete audio file on error: {cleanup_error}")
 
+        if 'session_id' in locals():
+            try:
+                from shared.supabase_client import update_video_status
+                update_video_status(session_id, 'failed', error=f"Transcription failed: {str(e)}")
+            except Exception as db_err:
+                print(f"[Transcribe] Failed to update DB status: {db_err}")
+            try:
+                from shared.websocket_notifier import notify_processing_error
+                notify_processing_error(session_id, f"Transcription failed: {str(e)}")
+            except Exception as ws_err:
+                print(f"[Transcribe] Failed to send WS error: {ws_err}")
+
         raise Exception(f"Transcription failed: {str(e)}")
  
  

@@ -22,10 +22,11 @@ warnings.filterwarnings('ignore', category=UserWarning)
 try:
     from shared.logger import get_logger
     from shared.metrics import track_transcription_time, track_ai_api_call
-    from shared.websocket_notifier import notify_processing_progress
+    from shared.websocket_notifier import notify_processing_progress, notify_processing_error
     from shared.dynamodb_client import update_video_session
     from shared.circuit_breaker import groq_circuit_breaker, assemblyai_circuit_breaker, deepgram_circuit_breaker
     from shared.s3_utils import get_transcript_key
+    from shared.supabase_client import update_video_status as supabase_update_status
     UTILITIES_AVAILABLE = True
     print("[Transcribe] Scalability utilities loaded successfully")
 except ImportError as e:
@@ -485,6 +486,7 @@ def lambda_handler(event, context):
             try:
                 update_video_session(session_id, user_id, status='transcribing', current_step='Transcribing audio')
                 notify_processing_progress(session_id, 'transcribing', 20, "Transcribing audio...")
+                supabase_update_status(session_id, 'transcribing')
             except Exception as e:
                 print(f"[Transcribe] Warning: Session update failed: {e}")
 
@@ -584,5 +586,16 @@ def lambda_handler(event, context):
                 print(f"[Transcribe] Cleaned up audio after error")
         except Exception as cleanup_error:
             print(f"[Transcribe] Warning: Failed to delete audio file on error: {cleanup_error}")
+
+        if 'session_id' in locals():
+            try:
+                supabase_update_status(session_id, 'failed', error=f"Transcription failed: {str(e)}")
+            except Exception as db_err:
+                print(f"[Transcribe] Failed to update DB status: {db_err}")
+            if UTILITIES_AVAILABLE:
+                try:
+                    notify_processing_error(session_id, f"Transcription failed: {str(e)}")
+                except Exception as ws_err:
+                    print(f"[Transcribe] Failed to send WS error: {ws_err}")
 
         raise Exception(f"Transcription failed: {str(e)}")

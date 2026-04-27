@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'shared'))
 # Import scalability utilities (graceful fallback)
 try:
     from shared.logger import get_logger
-    from shared.websocket_notifier import notify_processing_complete
+    from shared.websocket_notifier import notify_processing_complete, notify_processing_error
     from shared.dynamodb_client import update_video_session
     from shared.metrics import track_video_processing_complete
     UTILITIES_AVAILABLE = True
@@ -30,14 +30,10 @@ except ImportError as e:
     print(f"[Finalize] Warning: Shared utilities not available: {str(e)}")
     UTILITIES_AVAILABLE = False
 
-# HIGH PRIORITY FIX #9: Import Firebase Admin SDK-based Firestore client
-try:
-    from shared.firestore_client import get_firestore_client
-    FIRESTORE_CLIENT_AVAILABLE = True
-    print("[Finalize] Firestore Admin SDK client loaded successfully")
-except ImportError as e:
-    print(f"[Finalize] Warning: Firestore client not available: {str(e)}")
-    FIRESTORE_CLIENT_AVAILABLE = False
+# Supabase config
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+
 
 # Initialize logger if available
 if UTILITIES_AVAILABLE:
@@ -71,132 +67,89 @@ BUCKET_NAME = os.environ.get('BUCKET_NAME', 'opus-clip-videos')
 FIREBASE_PROJECT_ID = os.environ.get('FIREBASE_PROJECT_ID', 'reframeai-87b24')
 
 
-def update_firestore_video(user_id, session_id, data):
-    """
-    HIGH PRIORITY FIX #9: Update video status in Firestore using Admin SDK
-    Replaced Firebase Web API Key with Admin SDK for secure backend authentication
-    """
-    if not user_id:
-        print("[Firestore] Skipping update - missing user_id")
-        return
-
-    if not FIRESTORE_CLIENT_AVAILABLE:
-        print("[Firestore] WARNING: Firestore client not available, skipping update")
+def update_supabase_video(session_id, data):
+    """Update video status and clips in Supabase via REST API."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        print("[Supabase] Skipping update - SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set")
         return
 
     try:
-        db = get_firestore_client()
-        if not db:
-            print("[Firestore] ERROR: Could not initialize Firestore client")
-            return
+        expiry_time = (datetime.utcnow() + timedelta(days=3)).isoformat() + 'Z'
 
-        # Reference to the video document
-        doc_ref = db.collection('users').document(user_id).collection('videos').document(session_id)
-
-        # Build update data
-        update_data = {
-            'status': data.get('status', 'completed'),
-            'completedAt': datetime.utcnow()
-        }
-
-        # Add clips data
-        if "clips" in data and data["clips"]:
-            clips_array = []
-            # Calculate expiry: 3 days from now
-            expiry_time = datetime.utcnow() + timedelta(days=3)
-
-            for clip in data["clips"]:
-                clip_obj = {
-                    "clipIndex": clip["clip_index"],
-                    "downloadUrl": clip["download_url"],
-                    "s3Key": clip["s3_key"],
-                    "expiresAt": expiry_time
-                }
-
-                # Add optional fields if present
-                if "title" in clip and clip["title"]:
-                    clip_obj["title"] = clip["title"]
-                if "virality_score" in clip and clip["virality_score"] is not None:
-                    clip_obj["virality_score"] = clip["virality_score"]
-                if "duration" in clip and clip["duration"] is not None:
-                    clip_obj["duration"] = clip["duration"]
-                if "startTime" in clip and clip["startTime"] is not None:
-                    clip_obj["startTime"] = clip["startTime"]
-                if "endTime" in clip and clip["endTime"] is not None:
-                    clip_obj["endTime"] = clip["endTime"]
-                if "template_id" in clip and clip["template_id"]:
-                    clip_obj["template_id"] = clip["template_id"]
-                if "template_name" in clip and clip["template_name"]:
-                    clip_obj["template_name"] = clip["template_name"]
-
-                # Add score breakdown if present
-                if "score_breakdown" in clip and clip["score_breakdown"]:
-                    clip_obj["score_breakdown"] = clip["score_breakdown"]
-
-                clips_array.append(clip_obj)
-
-            update_data["clips"] = clips_array
-
-        # Add video info if present
-        if "video_info" in data and data["video_info"]:
-            video_info = data["video_info"]
-            update_data["videoInfo"] = {
-                "title": video_info.get("title", ""),
-                "duration": video_info.get("duration", 0),
-                "thumbnail": video_info.get("thumbnail", "")
+        clips_array = []
+        for clip in data.get('clips', []):
+            clip_obj = {
+                'clipIndex': clip['clip_index'],
+                'downloadUrl': clip['download_url'],
+                's3Key': clip['s3_key'],
+                'expiresAt': expiry_time,
             }
+            for field in ('title', 'virality_score', 'duration', 'startTime', 'endTime',
+                          'template_id', 'template_name', 'score_breakdown'):
+                if clip.get(field) is not None:
+                    clip_obj[field] = clip[field]
+            clips_array.append(clip_obj)
 
-        # Add error if present
-        if "error" in data:
-            update_data["error"] = data["error"]
-            update_data["status"] = "failed"
+        update_payload = {
+            'status': 'failed' if 'error' in data else data.get('status', 'completed'),
+            'clips': clips_array,
+            'completed_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        if data.get('error'):
+            update_payload['error'] = data['error']
+        if data.get('video_info'):
+            update_payload['video_info'] = data['video_info']
 
-        # Update document (merge with existing fields)
-        doc_ref.set(update_data, merge=True)
-        print(f"[Firestore] ✓ Successfully updated video {session_id}")
+        url = f"{SUPABASE_URL}/rest/v1/videos?session_id=eq.{urllib.parse.quote(session_id)}"
+        body = json.dumps(update_payload).encode('utf-8')
+        req = urllib.request.Request(
+            url, data=body, method='PATCH',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+                'apikey': SUPABASE_SERVICE_ROLE_KEY,
+                'Prefer': 'return=minimal',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            print(f"[Supabase] ✓ Video {session_id} updated (HTTP {resp.status})")
 
     except Exception as e:
-        print(f"[Firestore] Error updating document: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"[Supabase] Error updating video: {e}")
 
 
-def update_user_stats(user_id, total_clips):
-    """
-    HIGH PRIORITY FIX #9: Increment user's totalClips count in Firestore using Admin SDK
-    Replaced Firebase Web API Key with Admin SDK for secure backend authentication
-    """
-    if not user_id:
-        print("[Firestore] Skipping stats update - missing user_id")
+def update_supabase_user_stats(user_id, total_clips):
+    """Increment total_clips for a user in Supabase via RPC."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         return
-
-    if not FIRESTORE_CLIENT_AVAILABLE:
-        print("[Firestore] WARNING: Firestore client not available, skipping stats update")
-        return
-
     try:
-        db = get_firestore_client()
-        if not db:
-            print("[Firestore] ERROR: Could not initialize Firestore client")
-            return
+        # Read current value then write back (Supabase REST has no atomic increment without RPC)
+        url = f"{SUPABASE_URL}/rest/v1/users?id=eq.{urllib.parse.quote(user_id)}&select=total_clips"
+        req = urllib.request.Request(url, headers={
+            'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+            'apikey': SUPABASE_SERVICE_ROLE_KEY,
+        })
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            rows = json.loads(resp.read().decode())
+        current = rows[0].get('total_clips', 0) if rows else 0
 
-        # Import firestore for FieldValue
-        from firebase_admin import firestore as admin_firestore
-
-        # Reference to user document
-        user_ref = db.collection('users').document(user_id)
-
-        # Use Firestore increment to atomically add to totalClips
-        user_ref.set({
-            'totalClips': admin_firestore.Increment(total_clips)
-        }, merge=True)
-
-        print(f"[Firestore] ✓ Incremented user stats: totalClips += {total_clips}")
-
+        patch_url = f"{SUPABASE_URL}/rest/v1/users?id=eq.{urllib.parse.quote(user_id)}"
+        body = json.dumps({'total_clips': current + total_clips}).encode('utf-8')
+        patch_req = urllib.request.Request(
+            patch_url, data=body, method='PATCH',
+            headers={
+                'Content-Type': 'application/json',
+                'Authorization': f'Bearer {SUPABASE_SERVICE_ROLE_KEY}',
+                'apikey': SUPABASE_SERVICE_ROLE_KEY,
+                'Prefer': 'return=minimal',
+            }
+        )
+        with urllib.request.urlopen(patch_req, timeout=5) as resp:
+            print(f"[Supabase] ✓ User {user_id} total_clips → {current + total_clips}")
     except Exception as e:
-        print(f"[Firestore] Error updating user stats: {str(e)}")
-        import traceback
-        traceback.print_exc()
+        print(f"[Supabase] Error updating user stats: {e}")
+
+
 
 def lambda_handler(event, context):
     """
@@ -341,10 +294,10 @@ def lambda_handler(event, context):
 
         print(f"[Finalize] Complete! Generated {len(clip_urls)} download URLs")
 
-        # Update Firestore with completed video data
+        # Update Supabase (primary) and Firestore (legacy fallback)
         if user_id:
-            update_firestore_video(user_id, session_id, result)
-            update_user_stats(user_id, len(clip_urls))
+            update_supabase_video(session_id, result)
+            update_supabase_user_stats(user_id, len(clip_urls))
 
         # Update session and notify via WebSocket
         if UTILITIES_AVAILABLE and user_id:
@@ -370,4 +323,16 @@ def lambda_handler(event, context):
 
     except Exception as e:
         print(f"[Finalize] Error: {str(e)}")
+
+        if 'session_id' in locals():
+            try:
+                update_supabase_video(session_id, {'error': str(e), 'status': 'failed'})
+            except Exception as db_err:
+                print(f"[Finalize] Failed to update DB status: {db_err}")
+            if UTILITIES_AVAILABLE:
+                try:
+                    notify_processing_error(session_id, f"Finalization failed: {str(e)}")
+                except Exception as ws_err:
+                    print(f"[Finalize] Failed to send WS error: {ws_err}")
+
         raise Exception(f"Failed to finalize: {str(e)}")

@@ -568,7 +568,8 @@ def lambda_handler(event, context):
            'video_info': video_info
        }
    except Exception as e:
-       print(f"[Download] Error: {str(e)}")
+       error_msg = str(e)
+       print(f"[Download] Error: {error_msg}")
        # Clean up on error
        if 'local_path' in locals() and os.path.exists(local_path):
            try:
@@ -580,4 +581,16 @@ def lambda_handler(event, context):
                os.remove(cookies_file)
            except:
                pass
-       raise Exception(f"Failed to download video: {str(e)}")
+       # Update DB and notify frontend
+       if 'session_id' in locals():
+           try:
+               from shared.supabase_client import update_video_status
+               update_video_status(session_id, 'failed', error=f"Download failed: {error_msg}")
+           except Exception as db_err:
+               print(f"[Download] Failed to update DB status: {db_err}")
+           try:
+               from shared.websocket_notifier import notify_processing_error
+               notify_processing_error(session_id, f"Download failed: {error_msg}")
+           except Exception as ws_err:
+               print(f"[Download] Failed to send WS error: {ws_err}")
+       raise Exception(f"Failed to download video: {error_msg}")

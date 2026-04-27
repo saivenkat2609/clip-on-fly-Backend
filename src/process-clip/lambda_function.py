@@ -21,17 +21,12 @@ try:
     from shared.logger import get_logger
     from shared.metrics import track_clip_processing_time
     from shared.s3_utils import get_s3_prefix, get_clip_key
-    from shared.firestore_client import add_clip_to_firestore
     UTILITIES_AVAILABLE = True
-    FIRESTORE_AVAILABLE = True
     print("[ProcessClip] Scalability utilities loaded successfully")
 except ImportError as e:
     print(f"[ProcessClip] Warning: Shared utilities not available: {str(e)}")
     UTILITIES_AVAILABLE = False
-    FIRESTORE_AVAILABLE = False
-    # Fallback for sharding function
     get_clip_key = lambda user_id, session_id, clip_index, aspect_ratio: f"{session_id}/clips/clip_{clip_index}_{aspect_ratio.replace(':', 'x')}.mp4"
-    add_clip_to_firestore = lambda *args, **kwargs: False
 
 # Initialize logger
 if UTILITIES_AVAILABLE:
@@ -634,6 +629,19 @@ def lambda_handler(event, context):
         print(f"[TIMING] Failed after {time.time() - start_total:.2f}s")
         import traceback
         print(f"[ProcessClip] Traceback: {traceback.format_exc()}")
+
+        if 'session_id' in locals():
+            try:
+                from shared.supabase_client import update_video_status
+                update_video_status(session_id, 'failed', error=f"Clip processing failed: {str(e)}")
+            except Exception as db_err:
+                print(f"[ProcessClip] Failed to update DB status: {db_err}")
+            try:
+                from shared.websocket_notifier import notify_processing_error
+                notify_processing_error(session_id, f"Clip processing failed: {str(e)}")
+            except Exception as ws_err:
+                print(f"[ProcessClip] Failed to send WS error: {ws_err}")
+
         raise Exception(f"Failed to process clip: {str(e)}")
 
 

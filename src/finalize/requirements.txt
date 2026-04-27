@@ -1,6 +1,3 @@
-# HIGH PRIORITY FIX #9: Firebase Admin SDK for secure backend authentication
-firebase-admin==6.5.0
-
 # Built-in to Lambda:
 # - boto3 (AWS SDK)
 # - urllib (Python standard library)

@@ -21,8 +21,9 @@ try:
     from shared.logger import get_logger
     from shared.metrics import track_clip_detection_time, track_ai_api_call
     from shared.dynamodb_client import update_video_session
-    from shared.websocket_notifier import notify_processing_progress
+    from shared.websocket_notifier import notify_processing_progress, notify_processing_error
     from shared.s3_utils import get_s3_prefix, get_storage_client
+    from shared.supabase_client import update_video_status as supabase_update_status
 
     # Define NetworkError (was in errorHandler which doesn't exist)
     class NetworkError(Exception):
@@ -190,6 +191,7 @@ def lambda_handler(event, context):
                     status='detecting_clips',
                     current_step='Analyzing transcript with AI'
                 )
+                supabase_update_status(session_id, 'detecting_clips')
             except Exception as e:
                 if logger:
                     logger.warning("Failed to update session", error=str(e))
@@ -388,6 +390,18 @@ def lambda_handler(event, context):
                 )
             except:
                 pass
+
+        _sid = event.get('session_id')
+        if _sid:
+            try:
+                supabase_update_status(_sid, 'failed', error=f"Clip detection failed: {error_msg}")
+            except Exception as db_err:
+                print(f"[Detect] Failed to update DB status: {db_err}")
+            if UTILITIES_AVAILABLE:
+                try:
+                    notify_processing_error(_sid, f"Clip detection failed: {error_msg}")
+                except Exception as ws_err:
+                    print(f"[Detect] Failed to send WS error: {ws_err}")
 
         raise Exception(f"Failed to detect clips: {error_msg}")
 
