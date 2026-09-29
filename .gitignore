@@ -8,8 +8,6 @@ venv/
 env/
 ENV/
 *.egg-info/
-*.md
-!README.md
 dist/
 build/
 src/finalize/*
